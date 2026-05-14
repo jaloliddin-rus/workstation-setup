@@ -132,7 +132,18 @@ conda remove -n my-project --all
 
 ## Shared ML Environment
 
-There is a shared read-only environment with common ML and medical imaging packages.
+There is a shared read-only environment with common ML and medical imaging packages pre-installed.
+
+| Category | Packages |
+|---|---|
+| Deep learning | PyTorch, torchvision, torchaudio (CUDA-enabled) |
+| Notebooks | JupyterLab, ipykernel |
+| Data & arrays | NumPy, pandas, h5py |
+| Visualisation | Matplotlib, seaborn, TensorBoard |
+| Classical ML | scikit-learn, scikit-image, scipy |
+| Image & vision | Pillow, OpenCV (headless) |
+| Medical imaging | nibabel, pydicom, SimpleITK, MONAI |
+| Utilities | tqdm |
 
 Activate it:
 

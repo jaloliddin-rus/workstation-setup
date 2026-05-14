@@ -333,12 +333,19 @@ html = f"""<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escape(values["HOSTNAME"])} ML Workstation Onboarding</title>
   <style>
-    :root {{ color-scheme: dark; --bg:#101418; --panel:#171d23; --text:#e8edf2; --muted:#aab6c2; --line:#2c3742; --accent:#5dd3a5; --warn:#f0b45d; }}
-    body {{ margin:0; font-family:Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:var(--bg); color:var(--text); line-height:1.6; }}
-    main {{ max-width:980px; margin:0 auto; padding:32px 20px 56px; }}
+    :root {{ color-scheme: dark; --bg:#101418; --panel:#171d23; --text:#e8edf2; --muted:#8a9aaa; --line:#2c3742; --accent:#5dd3a5; --warn:#f0b45d; }}
+    *, *::before, *::after {{ box-sizing: border-box; }}
+    body {{ margin:0; font-family:Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:var(--bg); color:var(--text); line-height:1.6; display:flex; min-height:100vh; }}
+    nav#toc {{ width:230px; min-width:230px; background:var(--panel); border-right:1px solid var(--line); position:sticky; top:0; height:100vh; overflow-y:auto; padding:24px 0 32px; flex-shrink:0; }}
+    nav#toc .toc-title {{ font-size:0.7rem; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); padding:0 20px 10px; }}
+    nav#toc a {{ display:block; padding:5px 20px; font-size:0.88rem; color:var(--muted); text-decoration:none; border-left:2px solid transparent; transition:color .15s, border-color .15s; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+    nav#toc a:hover {{ color:var(--text); }}
+    nav#toc a.active {{ color:var(--accent); border-left-color:var(--accent); }}
+    nav#toc a.toc-h3 {{ padding-left:32px; font-size:0.82rem; }}
+    main {{ flex:1; max-width:900px; padding:32px 40px 56px; min-width:0; }}
     h1 {{ font-size:2rem; margin:0 0 14px; }}
-    h2 {{ margin-top:34px; padding-top:18px; border-top:1px solid var(--line); font-size:1.35rem; }}
-    h3 {{ margin-top:22px; font-size:1.1rem; }}
+    h2 {{ margin-top:34px; padding-top:18px; border-top:1px solid var(--line); font-size:1.35rem; scroll-margin-top:24px; }}
+    h3 {{ margin-top:22px; font-size:1.1rem; scroll-margin-top:24px; }}
     p {{ color:var(--text); }}
     table {{ width:100%; border-collapse:collapse; margin:14px 0 20px; background:var(--panel); }}
     th, td {{ border:1px solid var(--line); padding:10px 12px; text-align:left; vertical-align:top; }}
@@ -347,16 +354,47 @@ html = f"""<!doctype html>
     .code-block {{ position:relative; margin:14px 0 20px; }}
     pre {{ overflow:auto; background:#0b0f13; border:1px solid var(--line); border-radius:8px; padding:16px; }}
     pre code {{ background:transparent; padding:0; color:#e8edf2; }}
-    button {{ position:absolute; top:8px; right:8px; border:1px solid var(--line); background:#22303a; color:var(--text); border-radius:6px; padding:5px 10px; cursor:pointer; }}
+    button {{ position:absolute; top:8px; right:8px; border:1px solid var(--line); background:#22303a; color:var(--text); border-radius:6px; padding:5px 10px; cursor:pointer; font-size:0.8rem; }}
     button:hover {{ border-color:var(--accent); }}
     strong, b {{ color:var(--warn); }}
+    @media (max-width: 768px) {{ nav#toc {{ display:none; }} main {{ padding:24px 16px 40px; }} }}
   </style>
 </head>
 <body>
+<nav id="toc"><div class="toc-title">Contents</div></nav>
 <main>
 {chr(10).join(out)}
 </main>
 <script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+const headings = document.querySelectorAll('h2, h3');
+headings.forEach((h, i) => {{
+  h.id = 'section-' + i;
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  if (h.tagName === 'H3') a.classList.add('toc-h3');
+  toc.appendChild(a);
+}});
+
+// Highlight active section on scroll
+const tocLinks = toc.querySelectorAll('a');
+const observer = new IntersectionObserver((entries) => {{
+  entries.forEach(entry => {{
+    if (entry.isIntersecting) {{
+      tocLinks.forEach(a => a.classList.remove('active'));
+      const active = toc.querySelector('a[href="#' + entry.target.id + '"]');
+      if (active) {{
+        active.classList.add('active');
+        active.scrollIntoView({{ block: 'nearest' }});
+      }}
+    }}
+  }});
+}}, {{ rootMargin: '0px 0px -80% 0px' }});
+headings.forEach(h => observer.observe(h));
+
+// Copy buttons
 document.querySelectorAll('button[data-copy]').forEach((button) => {{
   button.addEventListener('click', async () => {{
     const code = document.getElementById(button.dataset.copy).innerText;
