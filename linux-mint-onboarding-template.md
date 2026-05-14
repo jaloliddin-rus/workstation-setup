@@ -21,11 +21,14 @@ Read this once before using the workstation. The goal is to help you log in, run
 
 | Location | What it is for |
 |---|---|
-| `/home/<your-username>` | Your private files, code, Conda environments, and experiments. Other users should not access this. |
+| `/home/<your-username>` | Your private files, code, Conda environments, and experiments. Other users should not access this. **Soft limit: {{HOME_QUOTA}} per user.** |
+| `/mnt/data/users/<your-username>` | Your private overflow storage on the secondary drive. Use this for large datasets, model checkpoints, and anything that does not fit in your home folder. Created automatically on first login. |
 | `/srv/shared` | Shared datasets, shared notes, and files intentionally shared with the lab. |
 | {{EXTRA_STORAGE_LOCATION}} | {{EXTRA_STORAGE_DESCRIPTION}} |
 
-Keep private or unfinished work in your home folder. Put files in `/srv/shared` only when other users are allowed to see or use them.
+Your home directory has a soft storage limit of {{HOME_QUOTA}}. If you go over this limit, you will receive a warning. Move large files to `/mnt/data/users/<your-username>` to free space. The secondary drive has {{DATA_DRIVE_TOTAL}} of total storage.
+
+Keep private or unfinished work in your home folder or your `/mnt/data` directory. Put files in `/srv/shared` only when other users are allowed to see or use them.
 
 ## Connecting
 
@@ -228,6 +231,53 @@ Only stop a tmux session when you are sure your experiment is finished:
 
 ```bash
 tmux kill-session -t experiment1
+```
+
+## Transferring Files With rsync
+
+Use `rsync` to copy files between your laptop and the workstation. It is faster than `scp` for large transfers because it only sends the parts that changed.
+
+### Copy a file or folder to the workstation
+
+From your laptop terminal:
+
+```bash
+rsync -avh --progress /path/to/local/folder/ your-username@<IP_ADDRESS>:/home/your-username/destination/
+```
+
+The trailing `/` on the source folder means "copy the contents." Without it, rsync copies the folder itself inside the destination.
+
+### Copy a file or folder from the workstation to your laptop
+
+```bash
+rsync -avh --progress your-username@<IP_ADDRESS>:/home/your-username/results/ /path/to/local/folder/
+```
+
+### Resume an interrupted transfer
+
+If a large transfer gets interrupted, run the same command again. rsync skips files that are already complete.
+
+### Common options
+
+| Option | What it does |
+|---|---|
+| `-a` | Archive mode — preserves permissions, timestamps, and subdirectories |
+| `-v` | Verbose — shows file names as they transfer |
+| `-h` | Human-readable sizes (MB, GB) |
+| `--progress` | Shows transfer progress for each file |
+| `--exclude='*.tmp'` | Skip files matching a pattern |
+| `--dry-run` | Preview what would be copied without actually copying |
+
+### Example: sync a dataset to your data directory
+
+```bash
+rsync -avh --progress /mnt/nas/dataset/ your-username@<IP_ADDRESS>:/mnt/data/users/your-username/dataset/
+```
+
+Always use `--dry-run` first if you are unsure what will be copied:
+
+```bash
+rsync -avh --dry-run /path/to/source/ your-username@<IP_ADDRESS>:/path/to/destination/
 ```
 
 ## GPU Use

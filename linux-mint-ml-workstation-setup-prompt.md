@@ -98,6 +98,21 @@ Install system-wide essentials:
 sudo apt install -y git tmux htop tree unzip curl wget build-essential libgl1 libglib2.0-0
 ```
 
+Install Node.js system-wide via NodeSource (the distro `npm` package is outdated):
+```bash
+curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
+  sudo gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+sudo chmod 644 /etc/apt/keyrings/nodesource.gpg
+
+echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | \
+  sudo tee /etc/apt/sources.list.d/nodesource.list
+sudo chmod 644 /etc/apt/sources.list.d/nodesource.list
+
+sudo apt update
+sudo apt install -y nodejs
+node --version && npm --version
+```
+
 ---
 
 ## Phase 2: Tighten existing home directories
@@ -174,6 +189,113 @@ getfacl /data/shared
 ```
 
 Note: group membership takes effect on next login.
+
+---
+
+## Phase 5b: Per-user directories on secondary drive
+
+Create private per-user directories on the secondary drive so users have overflow storage:
+
+```bash
+sudo mkdir -p /mnt/data/users
+sudo chmod 755 /mnt/data/users
+
+# For each existing user:
+sudo mkdir -p /mnt/data/users/<username>
+sudo chown <username>:<username> /mnt/data/users/<username>
+sudo chmod 700 /mnt/data/users/<username>
+```
+
+Auto-create for future users on first login:
+```bash
+sudo tee /etc/profile.d/user-data-dir.sh > /dev/null << 'EOF'
+if [ "$(id -u)" -ge 1000 ] && [ -d /mnt/data/users ] && [ -z "$_USER_DATA_DIR_DONE" ]; then
+    _USER_DATA_DIR_DONE=1
+    export _USER_DATA_DIR_DONE
+    USER_DATA="/mnt/data/users/$(id -un)"
+
+    if [ ! -d "$USER_DATA" ]; then
+        mkdir -p "$USER_DATA"
+        chmod 700 "$USER_DATA"
+    fi
+
+    if [ -d "$HOME/Desktop" ] && [ ! -f "$HOME/Desktop/my-data.desktop" ]; then
+        cat > "$HOME/Desktop/my-data.desktop" << INNER
+[Desktop Entry]
+Name=My Data Storage
+Comment=Your personal directory on the secondary drive (/mnt/data)
+Exec=nemo $USER_DATA
+Icon=folder
+Terminal=false
+Type=Application
+INNER
+        chmod 755 "$HOME/Desktop/my-data.desktop"
+    fi
+
+    if [ -d "$HOME/.config/gtk-3.0" ] && ! grep -q "/mnt/data/users/" "$HOME/.config/gtk-3.0/bookmarks" 2>/dev/null; then
+        echo "file://$USER_DATA My Data Storage" >> "$HOME/.config/gtk-3.0/bookmarks"
+    fi
+fi
+EOF
+sudo chmod 644 /etc/profile.d/user-data-dir.sh
+```
+
+Add desktop shortcut and file manager bookmark for each existing user:
+```bash
+# For each user, create ~/Desktop/my-data.desktop pointing to /mnt/data/users/<username>
+# and append bookmark to ~/.config/gtk-3.0/bookmarks
+```
+
+---
+
+## Phase 5c: Disk quotas and new-user automation
+
+Install quota tools and enable soft quotas on the root partition (where /home lives):
+
+```bash
+sudo apt install -y quota
+# Ensure /etc/fstab has usrquota option on the root partition, then:
+sudo mount -o remount /
+sudo quotacheck -cum /
+sudo quotaon /
+```
+
+Set a 200G soft limit (warning only, no hard block) for each standard user:
+```bash
+sudo setquota -u <username> 200G 0 0 0 /
+```
+
+Skip admin users — they have no limit.
+
+**Automate all new-user setup** with `/usr/local/sbin/adduser.local` (hook called by `adduser` after creating a user):
+
+```bash
+sudo tee /usr/local/sbin/adduser.local > /dev/null << 'EOF'
+#!/bin/bash
+USERNAME="$1"
+UID_NUM="$2"
+HOME_DIR="$4"
+
+[ "$UID_NUM" -ge 1000 ] || exit 0
+
+usermod -aG labshared "$USERNAME" 2>/dev/null
+setquota -u "$USERNAME" 200G 0 0 0 / 2>/dev/null
+
+if [ -d /mnt/data/users ]; then
+    mkdir -p "/mnt/data/users/$USERNAME"
+    chown "$USERNAME:$USERNAME" "/mnt/data/users/$USERNAME"
+    chmod 700 "/mnt/data/users/$USERNAME"
+fi
+
+exit 0
+EOF
+sudo chmod 755 /usr/local/sbin/adduser.local
+```
+
+This eliminates all manual steps when creating users — `sudo adduser <username>` now automatically:
+- Adds user to `labshared` group
+- Sets 200G soft quota on /home
+- Creates private `/mnt/data/users/<username>` directory
 
 ---
 
@@ -640,6 +762,15 @@ Run a comprehensive check of everything:
 - Screen timeout is 1800 seconds (gsettings get org.cinnamon.settings-daemon.plugins.power sleep-display-ac)
 - xrdp is running and enabled (systemctl status xrdp)
 - UFW allows port 3389/tcp
+- Node.js and npm are installed system-wide (`node --version`, `npm --version`)
+- Secondary drive is ext4 with `usrquota,acl` in fstab (`mount | grep /mnt/data`)
+- `/mnt/data` is chmod 755 (not 777)
+- `/mnt/data/users/` exists, chmod 755, with a private dir (700) per user
+- Disk quotas are active (`repquota /` shows soft limits for standard users)
+- `/usr/local/sbin/adduser.local` exists, chmod 755, automates group + quota + data dir
+- `/etc/profile.d/user-data-dir.sh` is chmod 644
+- My Data Storage desktop shortcut exists for all users
+- My Data Storage bookmark in file manager for all users
 - All files in /etc/apt/sources.list.d/ are chmod 644 (NOT 600)
 
 Fix any issues found. Then remove the temporary NOPASSWD entry:
