@@ -615,10 +615,16 @@ sudo systemctl restart polkit
 ## Phase 12: Onboarding doc + desktop integration
 
 Use the same onboarding structure on every workstation. Start from `linux-mint-onboarding-template.md` in this repository and fill only the machine-specific placeholders:
-- Hostname, admin contact, CPU, RAM, GPU, VRAM, NVIDIA driver, driver-supported CUDA, installed CUDA Toolkit, storage layout, shared folder location, resource limits, and installed tools.
-- Keep the same headings and order across machines.
-- Write both `/srv/shared/ONBOARDING.md` and `/srv/shared/ONBOARDING.html` with the same content.
-- The HTML version must use a readable dark theme and copy-to-clipboard buttons on code blocks.
+- `HOSTNAME`, `OS_VERSION`, `CPU_SUMMARY`, `RAM_SUMMARY`, `GPU_SUMMARY`, `NVIDIA_DRIVER`, `DRIVER_CUDA`, `CUDA_TOOLKIT`
+- `ADMIN_CONTACT`, `HOME_QUOTA`, `DATA_DRIVE_TOTAL`
+- `USER_DATA_BASE` — the base path for per-user overflow dirs (e.g. `/data/users` or `/mnt/data/users`)
+- `EXTRA_STORAGE_LOCATION`, `EXTRA_STORAGE_DESCRIPTION` — any additional storage row in the table
+- `CPU_LIMIT`, `MEMORY_HIGH`, `MEMORY_MAX`, `TASKS_MAX`
+
+Keep the same headings and order across machines. Write both `/srv/shared/ONBOARDING.md` (plain text) and `/srv/shared/ONBOARDING.html`. The HTML version must:
+- Use a readable dark theme
+- Include copy-to-clipboard buttons on all code blocks
+- Include a sticky left-sidebar table of contents auto-generated from headings
 - The guide is for users who may not be technically experienced. Keep the wording explicit and step-by-step.
 - Include the tmux section from the template so SSH users know how to keep experiments running after disconnects.
 
