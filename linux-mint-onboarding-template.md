@@ -22,13 +22,13 @@ Read this once before using the workstation. The goal is to help you log in, run
 | Location | What it is for |
 |---|---|
 | `/home/<your-username>` | Your private files, code, Conda environments, and experiments. Other users should not access this. **Soft limit: {{HOME_QUOTA}} per user.** |
-| `/mnt/data/users/<your-username>` | Your private overflow storage on the secondary drive. Use this for large datasets, model checkpoints, and anything that does not fit in your home folder. Created automatically on first login. |
+| `{{USER_DATA_BASE}}/<your-username>` | Your private overflow storage on the secondary drive. Use this for large datasets, model checkpoints, and anything that does not fit in your home folder. Created automatically on first login. |
 | `/srv/shared` | Shared datasets, shared notes, and files intentionally shared with the lab. |
 | {{EXTRA_STORAGE_LOCATION}} | {{EXTRA_STORAGE_DESCRIPTION}} |
 
-Your home directory has a soft storage limit of {{HOME_QUOTA}}. If you go over this limit, you will receive a warning. Move large files to `/mnt/data/users/<your-username>` to free space. The secondary drive has {{DATA_DRIVE_TOTAL}} of total storage.
+Your home directory has a soft storage limit of {{HOME_QUOTA}}. If you go over this limit, you will receive a warning every time you open a terminal. Move large files to `{{USER_DATA_BASE}}/<your-username>` to free space. The secondary drive has {{DATA_DRIVE_TOTAL}} of total storage.
 
-Keep private or unfinished work in your home folder or your `/mnt/data` directory. Put files in `/srv/shared` only when other users are allowed to see or use them.
+Keep private or unfinished work in your home folder or your `{{USER_DATA_BASE}}` directory. Put files in `/srv/shared` only when other users are allowed to see or use them.
 
 ## Connecting
 
@@ -271,7 +271,7 @@ If a large transfer gets interrupted, run the same command again. rsync skips fi
 ### Example: sync a dataset to your data directory
 
 ```bash
-rsync -avh --progress /mnt/nas/dataset/ your-username@<IP_ADDRESS>:/mnt/data/users/your-username/dataset/
+rsync -avh --progress /mnt/nas/dataset/ your-username@<IP_ADDRESS>:{{USER_DATA_BASE}}/your-username/dataset/
 ```
 
 Always use `--dry-run` first if you are unsure what will be copied:

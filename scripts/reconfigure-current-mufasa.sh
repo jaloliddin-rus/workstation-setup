@@ -233,6 +233,10 @@ generate_onboarding() {
   EXTRA_STORAGE_LOCATION="/mnt/data"
   EXTRA_STORAGE_DESCRIPTION="$(df -h /mnt/data 2>/dev/null | awk 'NR==2 {print $2 " secondary data drive mounted at /mnt/data (" $4 " free)"}')"
   EXTRA_STORAGE_DESCRIPTION="${EXTRA_STORAGE_DESCRIPTION:-Secondary storage, if mounted on this machine.}"
+  USER_DATA_BASE="/mnt/data/users"
+  HOME_QUOTA="200G"
+  DATA_DRIVE_TOTAL="$(df -h /mnt/data 2>/dev/null | awk 'NR==2 {print $2}')"
+  DATA_DRIVE_TOTAL="${DATA_DRIVE_TOTAL:-unknown}"
   CPU_LIMIT="$(($(nproc) - 1)) CPU threads reserved for users, with 1 thread left for the system"
   MEMORY_HIGH="about 88 GB"
   MEMORY_MAX="about 106 GB"
@@ -240,7 +244,8 @@ generate_onboarding() {
   ADMIN_CONTACT="jalal or admin"
 
   export HOSTNAME_VALUE OS_VERSION CPU_SUMMARY RAM_SUMMARY GPU_SUMMARY NVIDIA_DRIVER DRIVER_CUDA CUDA_TOOLKIT
-  export EXTRA_STORAGE_LOCATION EXTRA_STORAGE_DESCRIPTION CPU_LIMIT MEMORY_HIGH MEMORY_MAX TASKS_MAX ADMIN_CONTACT TEMPLATE tmp_md tmp_html
+  export EXTRA_STORAGE_LOCATION EXTRA_STORAGE_DESCRIPTION USER_DATA_BASE HOME_QUOTA DATA_DRIVE_TOTAL
+  export CPU_LIMIT MEMORY_HIGH MEMORY_MAX TASKS_MAX ADMIN_CONTACT TEMPLATE tmp_md tmp_html
 
   python3 - <<'PY'
 from html import escape
@@ -262,6 +267,9 @@ values = {
     "CUDA_TOOLKIT": os.environ["CUDA_TOOLKIT"],
     "EXTRA_STORAGE_LOCATION": os.environ["EXTRA_STORAGE_LOCATION"],
     "EXTRA_STORAGE_DESCRIPTION": os.environ["EXTRA_STORAGE_DESCRIPTION"],
+    "USER_DATA_BASE": os.environ["USER_DATA_BASE"],
+    "HOME_QUOTA": os.environ["HOME_QUOTA"],
+    "DATA_DRIVE_TOTAL": os.environ["DATA_DRIVE_TOTAL"],
     "CPU_LIMIT": os.environ["CPU_LIMIT"],
     "MEMORY_HIGH": os.environ["MEMORY_HIGH"],
     "MEMORY_MAX": os.environ["MEMORY_MAX"],

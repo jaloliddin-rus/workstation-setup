@@ -267,6 +267,24 @@ sudo setquota -u <username> 200G 0 0 0 /
 
 Skip admin users — they have no limit.
 
+Deploy a login warning so users see a message every terminal session when they are over quota:
+```bash
+sudo tee /etc/profile.d/quota-warn.sh > /dev/null << 'EOF'
+if [ "$(id -u)" -ge 1000 ] && command -v quota >/dev/null 2>&1; then
+    _quota_out="$(quota -s 2>/dev/null)"
+    if printf '%s\n' "$_quota_out" | grep -q '\*'; then
+        _used="$(printf '%s\n' "$_quota_out" | awk '/\*/ {gsub(/\*/, "", $2); print $2}')"
+        _soft="$(printf '%s\n' "$_quota_out" | awk '/\*/ {print $3}')"
+        printf '\n*** Disk quota warning: you are using %s of your %s soft limit on /home.\n' "$_used" "$_soft"
+        printf '    Move large files to /data/users/%s to free space.\n' "$(id -un)"
+        printf '    Run: quota -s   for details.\n\n'
+    fi
+    unset _quota_out _used _soft
+fi
+EOF
+sudo chmod 644 /etc/profile.d/quota-warn.sh
+```
+
 **Automate all new-user setup** with `/usr/local/sbin/adduser.local` (hook called by `adduser` after creating a user):
 
 ```bash
