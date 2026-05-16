@@ -649,6 +649,7 @@ if [ "$(id -u)" -ge 1000 ] && command -v nvidia-smi >/dev/null 2>&1; then
         awk -F',' -v me="$_me" '
         {
             gsub(/ /, "", $1); gsub(/ /, "", $2)
+            user = ""
             cmd = "ps -o user= -p " $1 " 2>/dev/null"
             cmd | getline user; close(cmd)
             gsub(/[ \n]/, "", user)
