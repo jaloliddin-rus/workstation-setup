@@ -59,14 +59,42 @@ Replace `your-username` with your Linux username. Replace `<IP_ADDRESS>` with th
 Use Remote Desktop if you need the graphical desktop.
 
 | Your computer | App to use |
-|---|---|
+|-|-|
 | Windows | Remote Desktop Connection |
 | macOS | Microsoft Remote Desktop |
 | Linux | Remmina |
 
 Connect to `<IP_ADDRESS>` using your Linux username and password.
 
-Important: if you are done working, log out from the Linux menu. Do not only close the Remote Desktop window, because that can leave your desktop session running. If a training job is running, it is okay to close the window without logging out.
+#### Reconnect behaviour
+
+Closing the Remote Desktop window does **not** end your session. When you reconnect from the same client, you go straight back to where you left off — your terminal windows, file manager, and any running programs are still there.
+
+When you are actually finished and want to free memory on the workstation, choose **Log Out** from the Linux menu. Only close the window (without logging out) when a training job is running and you want to come back to it later.
+
+#### Make Remote Desktop fast
+
+If the connection feels laggy, these tweaks make a big difference:
+
+- **macOS users:** in Microsoft Remote Desktop, edit your connection and **uncheck "Optimize for Retina displays"**. This is the single biggest speed-up.
+- **All clients:** set a **fixed resolution** like 1920×1080 instead of "Match window size". This also helps your session reattach cleanly when you reconnect.
+- **Disable audio redirection** if you do not need sound from the workstation.
+
+#### Connecting from outside the lab network
+
+The workstation uses light encryption for the RDP layer so the desktop feels responsive on the LAN. **This means anyone with packet-capture access to the network between your computer and the workstation could observe your session and the password you type at login.** On the lab LAN this is acceptable; on open Wi-Fi, hotel networks, or anything off-campus it is not.
+
+If you are off-site or on an untrusted network, always tunnel RDP through SSH first:
+
+```bash
+ssh -L 3389:localhost:3389 your-username@<IP_ADDRESS>
+```
+
+Then point your Remote Desktop client at `localhost:3389` instead of the workstation's address. The SSH tunnel encrypts everything end-to-end.
+
+#### If you can't reconnect
+
+If your session is stuck and reconnecting does not work, contact the admin. They can clear it in seconds without a reboot.
 
 ## Installed Tools
 
@@ -320,7 +348,12 @@ This workstation has per-user limits so one account cannot accidentally consume 
 | Memory hard limit | {{MEMORY_MAX}} |
 | Process/thread limit | {{TASKS_MAX}} |
 
-If your job is killed, it may have exceeded memory or process limits. Check your logs, reduce batch size, or ask the admin for help.
+If your job is killed, there are two common causes:
+
+1. **You hit one of the per-user limits in the table above** (most often the memory hard limit). Reduce batch size, `num_workers`, or model size.
+2. **The workstation ran low on total free memory.** A background service called `earlyoom` watches system memory and kills the heaviest process to keep the desktop from freezing. This can hit you even when you are below your own memory limit, if other users are also pushing the machine. For very large multi-process jobs, coordinate with other users in `/srv/shared/RESERVATIONS.md` first.
+
+Check your logs first. If neither explains it, ask the admin for help.
 
 ## Rules
 

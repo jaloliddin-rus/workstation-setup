@@ -28,8 +28,10 @@ getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 {print $1, $3, $6}'
 # Home directory permissions
 ls -ld /home/*
 
-# GPU health
+# GPU health (note the "Persistence-M" column — On means Phase 3 has nothing to do)
 nvidia-smi
+nvidia-smi --query-gpu=persistence_mode --format=csv 2>/dev/null
+systemctl is-enabled nvidia-persistenced 2>/dev/null || true
 
 # System info
 uname -r && lsb_release -a
@@ -128,11 +130,27 @@ Confirm all user homes show `drwx------`.
 
 ---
 
-## Phase 3: NVIDIA driver health
+## Phase 3: NVIDIA driver health and persistence mode
 
-If `nvidia-smi` worked in Phase 0, **skip this phase**. Note the "CUDA Version" from nvidia-smi — that's the max CUDA users can run.
+If `nvidia-smi` worked in Phase 0, the driver itself is fine. Note the "CUDA Version" from `nvidia-smi` — that's the maximum CUDA toolkit version users can run.
 
-If broken, tell me and I'll fix via Driver Manager GUI.
+If `nvidia-smi` failed in Phase 0, stop and tell me — I'll fix the driver via the Driver Manager GUI before continuing.
+
+Enable NVIDIA persistence mode. Without it, every new CUDA process pays a 1–3 second driver-init penalty and the GPU's clock/power state churns whenever users start and stop work — a real annoyance on a multi-tenant box. The `nvidia-persistenced` service ships with the proprietary driver; whether it is already enabled depends on which driver package the machine was installed with. Run the enable command regardless — it is idempotent.
+
+```bash
+sudo systemctl enable --now nvidia-persistenced
+```
+
+Verify:
+```bash
+systemctl is-active nvidia-persistenced
+nvidia-smi --query-gpu=persistence_mode --format=csv
+```
+
+`nvidia-smi --query-gpu=persistence_mode` should print `Enabled` for every GPU. The "Persistence-M" column of plain `nvidia-smi` output should show `On`.
+
+If `systemctl enable` fails with "Unit nvidia-persistenced.service not found", the driver package doesn't ship the service unit (rare — happens with some open-kernel-module variants). Fall back to `sudo apt install -y nvidia-persistenced`, or as a temporary measure run `sudo nvidia-smi -pm 1` (this is per-boot only and must be re-run after reboot).
 
 ---
 
@@ -317,27 +335,90 @@ This eliminates all manual steps when creating users — `sudo adduser <username
 
 ---
 
-## Phase 6: Resource limits via systemd
+## Phase 6: Memory pressure tuning for ML workloads
+
+PyTorch DataLoader workers reproducibly freeze a vanilla Linux Mint box when iterating over large datasets: default `vm.overcommit_memory=0` + `vm.swappiness=60` lets forked workers blow past memory pressure thresholds, the in-kernel OOM killer arrives too late to save the desktop, and systemd's default user-slice cap (~70% of RAM) wastes memory on a dedicated ML workstation.
+
+The four subsections below — kernel sysctl, zswap, earlyoom, and raised user-slice limits — work as one coordinated fix. Apply them together.
+
+### Kernel sysctl tuning
+
+Create `/etc/sysctl.d/99-ml-workstation.conf`. Compute `vm.min_free_kbytes` as ~0.2% of total RAM (reference: 128 GB → `262144`, 64 GB → `131072`, 32 GB → `65536`):
+
+```bash
+python3 -c "import os; print(int(os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE') * 0.002 / 1024))"
+```
+
+```ini
+vm.swappiness = 10
+vm.overcommit_memory = 2
+vm.overcommit_ratio = 95
+vm.min_free_kbytes = <SCALED_TO_RAM>
+vm.vfs_cache_pressure = 50
+vm.dirty_bytes = 524288000
+vm.dirty_background_bytes = 262144000
+```
+
+```bash
+sudo sysctl --system
+```
+
+No reboot needed for this part. **Caveat:** `vm.overcommit_memory=2` disables overcommit — allocations beyond `(swap + RAM × overcommit_ratio / 100)` fail immediately. This is what stops DataLoader from fork-bombing the box, but workloads that lean on overcommit (some JVM heap configurations, certain CUDA pinned-memory paths, large sparse `mmap`s) may surface `Cannot allocate memory` errors. Revisit these values per-workload if that happens.
+
+### Enable zswap
+
+Edit `/etc/default/grub` and set:
+
+```text
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash zswap.enabled=1 zswap.shrinker_enabled=1 zswap.compressor=lz4 zswap.max_pool_percent=30 zswap.accept_threshold_percent=80 zswap.zpool=zsmalloc"
+```
+
+```bash
+sudo update-grub
+```
+
+**Reboot required for zswap to activate.** Per the working agreement, pause here and tell me before rebooting — the other phases can finish first.
+
+### earlyoom userspace OOM killer
+
+```bash
+sudo apt install -y earlyoom
+sudo systemctl enable --now earlyoom
+```
+
+`earlyoom` watches available memory and kills the heaviest process before the kernel OOM path freezes the desktop.
+
+### Raise systemd user-slice limits
 
 **Scale these to the actual hardware** found in Phase 0:
 - CPUQuota: (total_cores - 1) * 100 — reserves 1 core for system, dynamic fair-share
-- MemoryHigh: ~70% of total RAM (soft limit)
-- MemoryMax: ~85% of total RAM (hard kill)
+- MemoryHigh: 95% of total RAM (soft limit) — raised from the conservative 70% default since this is a dedicated ML box and earlyoom + sysctl tuning above now handle pressure safely
+- MemoryMax: 97% of total RAM (hard kill)
 
-Create `/etc/systemd/system/user-.slice.d/limits.conf`:
+Create `/etc/systemd/system/user-.slice.d/limits.conf` (the `user-.slice.d` template form applies to every regular user — do **not** switch to `user-$(id -u).slice.d/` which would only cover one UID):
 
 ```ini
 [Slice]
-MemoryHigh=<scaled>
-MemoryMax=<scaled>
+MemoryHigh=95%
+MemoryMax=97%
 CPUQuota=<scaled>
 TasksMax=4096
 ```
 
 ```bash
 sudo systemctl daemon-reload
-systemctl show user-$(id -u).slice | grep -E 'MemoryMax|MemoryHigh|CPUQuota|TasksMax'
 ```
+
+### Verify Phase 6
+
+```bash
+sysctl vm.swappiness vm.overcommit_memory vm.overcommit_ratio vm.min_free_kbytes
+grep -r . /sys/module/zswap/parameters/
+systemctl is-active earlyoom
+systemctl show user-$(id -u).slice | grep -E 'MemoryHigh=|MemoryMax=|CPUQuota=|TasksMax='
+```
+
+Zswap parameters only show as enabled after reboot. The `systemctl show user-$(id -u).slice` command needs an active login session for that UID — if you're running over `sudo su` with no graphical session for the operator account, log in first or check from a real user shell. Everything else should be live immediately.
 
 ---
 
@@ -748,11 +829,87 @@ sudo systemctl enable xrdp
 sudo ufw allow 3389/tcp
 ```
 
-Verify:
+Out of the box, xrdp on Linux Mint is sluggish over the network and orphans sessions when the client window closes (subsequent reconnects spawn fresh sessions instead of reattaching). Tune `xrdp.ini` and `sesman.ini` before users start connecting.
+
+### Performance — /etc/xrdp/xrdp.ini
+
+In the `[Globals]` section, set:
+
+```ini
+crypt_level=low
+tcp_send_buffer_bytes=4194304
+tcp_recv_buffer_bytes=4194304
+```
+
+RDP-layer encryption is CPU-heavy. `crypt_level=low` is appropriate **only** when the workstation is reached over a trusted LAN — anyone with packet-capture access to that network segment could observe session contents and the password used at login. The onboarding template tells users to tunnel off-site connections through SSH (`ssh -L 3389:localhost:3389 user@host`); if you decide this LAN is not trusted, raise `crypt_level` instead.
+
+Make sure the `[Xorg]` session block appears **before** `[Xvnc]` in the file — xrdp picks the first matching backend, and xorgxrdp is dramatically faster than Xvnc. The Ubuntu/Mint default order is already correct; verify rather than assume.
+
+Apply with sed (back up first, then edit; the substitutions assume Ubuntu/Mint's default xrdp.ini which already contains a `crypt_level=` line):
+
 ```bash
+sudo cp /etc/xrdp/xrdp.ini /etc/xrdp/xrdp.ini.bak
+
+sudo sed -i 's/^crypt_level=.*/crypt_level=low/' /etc/xrdp/xrdp.ini
+
+# Insert TCP buffer lines into [Globals] only if missing (idempotent for re-runs):
+grep -q '^tcp_send_buffer_bytes=' /etc/xrdp/xrdp.ini || \
+  sudo sed -i '/^\[Globals\]/a tcp_send_buffer_bytes=4194304' /etc/xrdp/xrdp.ini
+grep -q '^tcp_recv_buffer_bytes=' /etc/xrdp/xrdp.ini || \
+  sudo sed -i '/^\[Globals\]/a tcp_recv_buffer_bytes=4194304' /etc/xrdp/xrdp.ini
+
+# Verify [Xorg] appears before [Xvnc]:
+grep -n '^\[Xorg\]\|^\[Xvnc\]' /etc/xrdp/xrdp.ini
+```
+
+### Reconnect behavior — /etc/xrdp/sesman.ini
+
+In the `[Sessions]` section:
+
+```ini
+KillDisconnected=false
+DisconnectedTimeLimit=0
+IdleTimeLimit=0
+Policy=Default
+```
+
+`Policy=Default` matches sessions on User + BitPerPixel only — the loosest matching policy, which is what makes reconnects reliably reattach to the existing session. Stricter policies like `UBDC` (User + BitPerPixel + Display + Client) match too tightly and spawn a fresh session almost every reconnect. The other three keys keep the session alive when the client window closes and disable auto-reap on idle.
+
+```bash
+sudo cp /etc/xrdp/sesman.ini /etc/xrdp/sesman.ini.bak
+
+sudo sed -i \
+  -e 's/^KillDisconnected=.*/KillDisconnected=false/' \
+  -e 's/^DisconnectedTimeLimit=.*/DisconnectedTimeLimit=0/' \
+  -e 's/^IdleTimeLimit=.*/IdleTimeLimit=0/' \
+  -e 's/^Policy=.*/Policy=Default/' \
+  /etc/xrdp/sesman.ini
+```
+
+### Apply and verify
+
+```bash
+sudo systemctl restart xrdp
+
 sudo systemctl status xrdp | grep Active
 sudo ufw status | grep 3389
+grep -E '^(crypt_level|tcp_send_buffer_bytes|tcp_recv_buffer_bytes)=' /etc/xrdp/xrdp.ini
+grep -E '^(KillDisconnected|DisconnectedTimeLimit|IdleTimeLimit|Policy)=' /etc/xrdp/sesman.ini
 ```
+
+### Troubleshooting stuck sessions
+
+If a user can't reconnect because a session is wedged, this is much lighter than a reboot:
+
+```bash
+sudo pkill -9 -u <username> -f 'Xorg|xrdp-chansrv|xrdp-sesman'
+sudo systemctl restart user@$(id -u <username>).service
+sudo systemctl restart xrdp
+```
+
+This clears orphan processes, resets the user's systemd/dbus runtime (the thing that prevents Cinnamon from restarting cleanly), and restarts xrdp. If that still doesn't help, check `~/.xsession-errors` and `/var/log/xrdp-sesman.log` — a `Window manager exited quickly` line in the sesman log means `startwm.sh` is dying and the real reason will be in xsession-errors.
+
+Cinnamon's compositor is genuinely heavy over RDP. If a machine consistently feels slow despite the tuning above, swapping the user session to MATE or XFCE is the next lever, but is not part of the default setup.
 
 ---
 
@@ -763,10 +920,15 @@ Run a comprehensive check of everything:
 - UMASK is 077, DIR_MODE is 0700
 - UFW active with only SSH (no stale rules from removed software)
 - nvidia-smi works
+- `nvidia-persistenced` service is active and enabled (`systemctl is-active nvidia-persistenced && systemctl is-enabled nvidia-persistenced`)
+- `nvidia-smi --query-gpu=persistence_mode --format=csv` reports `Enabled` for every GPU
 - CUDA Toolkit is installed intentionally (`nvcc --version` shows expected toolkit version, `CUDA_HOME` points to `/usr/local/cuda-<version>`)
 - labshared group has all users
 - /srv/shared has correct ACLs and setgid
-- systemd limits are active (check with systemctl show)
+- systemd limits are active (check with systemctl show) — `MemoryHigh` shows 95% of RAM and `MemoryMax` shows 97% of RAM (not the old 70/85% values)
+- `/etc/sysctl.d/99-ml-workstation.conf` exists and values are applied (`sysctl vm.swappiness vm.overcommit_memory vm.overcommit_ratio vm.min_free_kbytes`)
+- zswap is enabled at runtime (`cat /sys/module/zswap/parameters/enabled` shows `Y` — only after the GRUB reboot)
+- `earlyoom` service is active and enabled (`systemctl is-active earlyoom && systemctl is-enabled earlyoom`)
 - podman GPU test passes (run as regular user, not sudo)
 - nvitop is accessible by regular users (check permissions on /opt/pipx)
 - shared ML env works (PyTorch + CUDA + all packages)
@@ -786,6 +948,10 @@ Run a comprehensive check of everything:
 - Screen timeout is 1800 seconds (gsettings get org.cinnamon.settings-daemon.plugins.power sleep-display-ac)
 - xrdp is running and enabled (systemctl status xrdp)
 - UFW allows port 3389/tcp
+- `/etc/xrdp/xrdp.ini` has `crypt_level=low`, `tcp_send_buffer_bytes=4194304`, `tcp_recv_buffer_bytes=4194304` in `[Globals]`
+- `[Xorg]` section appears before `[Xvnc]` in `/etc/xrdp/xrdp.ini` (`grep -n '^\[Xorg\]\|^\[Xvnc\]' /etc/xrdp/xrdp.ini`)
+- `/etc/xrdp/sesman.ini` has `KillDisconnected=false`, `DisconnectedTimeLimit=0`, `IdleTimeLimit=0`, `Policy=Default` in `[Sessions]`
+- Backups exist at `/etc/xrdp/xrdp.ini.bak` and `/etc/xrdp/sesman.ini.bak`
 - Node.js and npm are installed system-wide (`node --version`, `npm --version`)
 - Secondary drive is ext4 with `usrquota,acl` in fstab (`mount | grep /mnt/data`)
 - `/mnt/data` is chmod 755 (not 777)
