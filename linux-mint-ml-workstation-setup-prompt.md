@@ -639,6 +639,37 @@ sudo chown root:labshared /srv/shared/RESERVATIONS.md
 sudo chmod 664 /srv/shared/RESERVATIONS.md
 ```
 
+Add a login-shell warning that names **other** users currently running CUDA processes (with per-user GPU memory) so people remember to check nvitop and coordinate before kicking off another large job:
+
+```bash
+sudo tee /etc/profile.d/gpu-active-warn.sh > /dev/null << 'EOF'
+if [ "$(id -u)" -ge 1000 ] && command -v nvidia-smi >/dev/null 2>&1; then
+    _me="$(id -un)"
+    _summary="$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2>/dev/null | \
+        awk -F',' -v me="$_me" '
+        {
+            gsub(/ /, "", $1); gsub(/ /, "", $2)
+            cmd = "ps -o user= -p " $1 " 2>/dev/null"
+            cmd | getline user; close(cmd)
+            gsub(/[ \n]/, "", user)
+            if (user != "" && user != me) mb[user] += $2
+        }
+        END {
+            for (u in mb) printf "%s (%.1f GB), ", u, mb[u]/1024
+        }' | sed 's/, $//')"
+    if [ -n "$_summary" ]; then
+        printf '\n*** GPU is currently in use by: %s\n' "$_summary"
+        printf '    Run: nvitop   to see what they are running.\n'
+        printf '    Coordinate large jobs via /srv/shared/RESERVATIONS.md before starting.\n\n'
+    fi
+    unset _me _summary
+fi
+EOF
+sudo chmod 644 /etc/profile.d/gpu-active-warn.sh
+```
+
+The script only looks at **compute** processes (`--query-compute-apps`), so idle Xorg/desktop graphics don't trigger the warning. The current user's own training is filtered out. `nvidia-smi` adds ~200 ms to login-shell startup; this only runs on login shells (not subshells), so it fires once per "I sat down at the terminal", not every command.
+
 ---
 
 ## Phase 11: Restrict non-admin users
@@ -931,6 +962,7 @@ Run a comprehensive check of everything:
 - `earlyoom` service is active and enabled (`systemctl is-active earlyoom && systemctl is-enabled earlyoom`)
 - podman GPU test passes (run as regular user, not sudo)
 - nvitop is accessible by regular users (check permissions on /opt/pipx)
+- `/etc/profile.d/gpu-active-warn.sh` exists, chmod 644, and prints when another user has a CUDA process running (test: have a second user start `python -c "import torch; torch.zeros(1).cuda(); input()"`, then open a fresh login shell as a different user)
 - shared ML env works (PyTorch + CUDA + all packages)
 - conda works for each new user (test with interactive shell: `sudo su - <user> -c 'bash -ic "conda --version"'`)
 - onboarding desktop shortcut exists for all users, owned by the user, chmod 755

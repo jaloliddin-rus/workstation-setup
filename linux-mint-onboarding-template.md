@@ -321,13 +321,23 @@ rsync -avh --dry-run /path/to/source/ your-username@<IP_ADDRESS>:/path/to/destin
 
 ## GPU Use
 
-Check the GPU before starting a large job:
+Whenever another user has a CUDA process running, your terminal will print a notice at login. It looks like this:
+
+```text
+*** GPU is currently in use by: alice (8.2 GB), bob (1.4 GB)
+    Run: nvitop   to see what they are running.
+    Coordinate large jobs via /srv/shared/RESERVATIONS.md before starting.
+```
+
+(You won't see this notice for your own training.)
+
+When you see it, run:
 
 ```bash
 nvitop
 ```
 
-If another user is already using most of the GPU memory, coordinate before starting another large job.
+to check how much GPU compute and memory is actually free. If most of the GPU is busy, hold off or coordinate before starting another large job.
 
 For long jobs, write your plan in:
 
