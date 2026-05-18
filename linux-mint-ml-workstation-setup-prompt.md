@@ -819,7 +819,7 @@ sudo chmod 644 /etc/xdg/autostart/onboarding.desktop
 
 ---
 
-## Phase 13: Disable sleep and configure screen timeout
+## Phase 13: Disable sleep and screen blanking
 
 Prevent the machine from sleeping/suspending (critical for long-running ML jobs):
 
@@ -827,7 +827,11 @@ Prevent the machine from sleeping/suspending (critical for long-running ML jobs)
 sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
 ```
 
-Set screen to turn off after 30 minutes for all users (via dconf):
+Disable all screen blanking and DPMS. **Do not set a screen-off timeout.** The NVIDIA proprietary driver combined with `nvidia-persistenced` does not reliably restore the display signal after DPMS-off — the monitor shows "No Signal" and physical input does not wake it. For an always-on ML workstation the correct posture is to never cut the display signal.
+
+Two layers of protection:
+
+**Layer 1 — Cinnamon/dconf** (disables the Cinnamon power and screensaver timers):
 
 ```bash
 sudo mkdir -p /etc/dconf/profile /etc/dconf/db/local.d
@@ -835,18 +839,58 @@ sudo mkdir -p /etc/dconf/profile /etc/dconf/db/local.d
 echo -e "user-db:user\nsystem-db:local" | sudo tee /etc/dconf/profile/user > /dev/null
 sudo chmod 644 /etc/dconf/profile/user
 
-echo -e "[org/cinnamon/settings-daemon/plugins/power]\nsleep-display-ac=1800\nsleep-display-battery=1800" | sudo tee /etc/dconf/db/local.d/01-power > /dev/null
+sudo tee /etc/dconf/db/local.d/01-power > /dev/null << 'EOF'
+[org/cinnamon/settings-daemon/plugins/power]
+sleep-display-ac=0
+sleep-display-battery=0
+
+[org/cinnamon/desktop/session]
+idle-delay=uint32 0
+EOF
 sudo chmod 644 /etc/dconf/db/local.d/01-power
 
 sudo dconf update
 sudo chmod 644 /etc/dconf/db/local
 ```
 
-**IMPORTANT:** All four `chmod 644` lines are required — UMASK 077 makes root-created files unreadable by default.
+**Layer 2 — Xorg** (disables DPMS at the X server level, survives per-user dconf overrides):
 
-Verify (should print `1800` with no warnings):
+```bash
+sudo mkdir -p /etc/X11/xorg.conf.d
+sudo tee /etc/X11/xorg.conf.d/10-no-dpms.conf > /dev/null << 'EOF'
+Section "ServerLayout"
+    Option "BlankTime"   "0"
+    Option "StandbyTime" "0"
+    Option "SuspendTime" "0"
+    Option "OffTime"     "0"
+EndSection
+EOF
+sudo chmod 644 /etc/X11/xorg.conf.d/10-no-dpms.conf
+```
+
+The Xorg config takes effect on the next `lightdm` restart (no reboot needed — but warn users before restarting lightdm as it drops all local desktop sessions).
+
+**IMPORTANT:** All `chmod 644` lines are required — UMASK 077 makes root-created files unreadable by default.
+
+Verify:
 ```bash
 gsettings get org.cinnamon.settings-daemon.plugins.power sleep-display-ac
+# → 0
+gsettings get org.cinnamon.desktop.session idle-delay
+# → uint32 0
+cat /etc/X11/xorg.conf.d/10-no-dpms.conf
+```
+
+### Recovery for machines already deployed with the old settings
+
+If a machine's screen is stuck dark ("No Signal") from a previous setup, fix it over SSH without a reboot:
+
+```bash
+# Immediately restore the display signal:
+DISPLAY=:0 xset dpms force on
+
+# Then apply the permanent fix above (dconf block + xorg.conf.d), then:
+sudo systemctl restart lightdm   # warn users first — kills local desktop sessions
 ```
 
 ---
@@ -978,7 +1022,8 @@ Run a comprehensive check of everything:
 - `/etc/skel/Desktop`, `/etc/skel/.config/autostart`, and `/etc/skel/.config/gtk-3.0` are readable/traversable by future users (chmod 755)
 - Sleep/suspend/hibernate targets are masked (systemctl status sleep.target should show "masked")
 - dconf profile and power config are chmod 644 (no permission warnings)
-- Screen timeout is 1800 seconds (gsettings get org.cinnamon.settings-daemon.plugins.power sleep-display-ac)
+- Screen blanking is disabled: `gsettings get org.cinnamon.settings-daemon.plugins.power sleep-display-ac` prints `0` and `gsettings get org.cinnamon.desktop.session idle-delay` prints `uint32 0`
+- `/etc/X11/xorg.conf.d/10-no-dpms.conf` exists and is chmod 644
 - xrdp is running and enabled (systemctl status xrdp)
 - UFW allows port 3389/tcp
 - `/etc/xrdp/xrdp.ini` has `crypt_level=low`, `tcp_send_buffer_bytes=4194304`, `tcp_recv_buffer_bytes=4194304` in `[Globals]`
