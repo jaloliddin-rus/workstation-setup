@@ -853,24 +853,33 @@ sudo dconf update
 sudo chmod 644 /etc/dconf/db/local
 ```
 
-**Layer 2 — Xorg** (disables DPMS at the X server level, survives per-user dconf overrides):
+**Layer 2 — lightdm display-setup-script** (disables DPMS at the X server protocol level immediately after Xorg starts, before the greeter, for every session):
+
+**Do NOT use a `Section "ServerLayout"` in xorg.conf.d for this** — that section requires `Identifier` plus `Screen`/`InputDevice` references; Options-only is a parse error that prevents Xorg from starting at all.
 
 ```bash
-sudo mkdir -p /etc/X11/xorg.conf.d
-sudo tee /etc/X11/xorg.conf.d/10-no-dpms.conf > /dev/null << 'EOF'
-Section "ServerLayout"
-    Option "BlankTime"   "0"
-    Option "StandbyTime" "0"
-    Option "SuspendTime" "0"
-    Option "OffTime"     "0"
-EndSection
+sudo tee /usr/local/bin/x11-no-dpms.sh > /dev/null << 'EOF'
+#!/bin/sh
+xset -dpms
+xset s off
+xset s noblank
 EOF
-sudo chmod 644 /etc/X11/xorg.conf.d/10-no-dpms.conf
+sudo chmod 755 /usr/local/bin/x11-no-dpms.sh
+
+sudo mkdir -p /etc/lightdm/lightdm.conf.d
+sudo tee /etc/lightdm/lightdm.conf.d/50-no-dpms.conf > /dev/null << 'EOF'
+[Seat:*]
+display-setup-script=/usr/local/bin/x11-no-dpms.sh
+EOF
+sudo chmod 644 /etc/lightdm/lightdm.conf.d/50-no-dpms.conf
 ```
 
-The Xorg config takes effect on the next `lightdm` restart (no reboot needed — but warn users before restarting lightdm as it drops all local desktop sessions).
+Then restart lightdm to load the hook (warn users first — kills local desktop sessions):
+```bash
+sudo systemctl restart lightdm
+```
 
-**IMPORTANT:** All `chmod 644` lines are required — UMASK 077 makes root-created files unreadable by default.
+**IMPORTANT:** All `chmod` lines are required — UMASK 077 makes root-created files unreadable by default.
 
 Verify:
 ```bash
@@ -878,19 +887,23 @@ gsettings get org.cinnamon.settings-daemon.plugins.power sleep-display-ac
 # → 0
 gsettings get org.cinnamon.desktop.session idle-delay
 # → uint32 0
-cat /etc/X11/xorg.conf.d/10-no-dpms.conf
+# Confirm lightdm ran the script at startup (look for exit status 0):
+sudo grep "no-dpms" /var/log/lightdm/lightdm.log | tail -3
 ```
 
-### Recovery for machines already deployed with the old settings
+### Recovery for machines with a stuck-dark screen
 
-If a machine's screen is stuck dark ("No Signal") from a previous setup, fix it over SSH without a reboot:
+If the screen shows "No Signal" but the box responds over SSH:
 
 ```bash
-# Immediately restore the display signal:
+# If lightdm is running but DPMS cut the signal, restore immediately:
 DISPLAY=:0 xset dpms force on
 
-# Then apply the permanent fix above (dconf block + xorg.conf.d), then:
-sudo systemctl restart lightdm   # warn users first — kills local desktop sessions
+# If lightdm itself is failing (Xorg parse error from a bad xorg.conf.d file):
+sudo rm /etc/X11/xorg.conf.d/10-no-dpms.conf   # remove the broken file if present
+sudo systemctl start lightdm
+
+# Then apply the permanent fix above and restart lightdm.
 ```
 
 ---
@@ -1023,7 +1036,9 @@ Run a comprehensive check of everything:
 - Sleep/suspend/hibernate targets are masked (systemctl status sleep.target should show "masked")
 - dconf profile and power config are chmod 644 (no permission warnings)
 - Screen blanking is disabled: `gsettings get org.cinnamon.settings-daemon.plugins.power sleep-display-ac` prints `0` and `gsettings get org.cinnamon.desktop.session idle-delay` prints `uint32 0`
-- `/etc/X11/xorg.conf.d/10-no-dpms.conf` exists and is chmod 644
+- `/usr/local/bin/x11-no-dpms.sh` exists and is chmod 755
+- `/etc/lightdm/lightdm.conf.d/50-no-dpms.conf` exists and is chmod 644
+- lightdm log confirms the script ran at startup with exit status 0 (`sudo grep "no-dpms" /var/log/lightdm/lightdm.log | tail -3`)
 - xrdp is running and enabled (systemctl status xrdp)
 - UFW allows port 3389/tcp
 - `/etc/xrdp/xrdp.ini` has `crypt_level=low`, `tcp_send_buffer_bytes=4194304`, `tcp_recv_buffer_bytes=4194304` in `[Globals]`
