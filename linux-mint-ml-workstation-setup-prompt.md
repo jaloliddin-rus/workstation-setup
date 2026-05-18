@@ -365,12 +365,12 @@ sudo sysctl --system
 
 No reboot needed for this part. **Caveat:** `vm.overcommit_memory=2` disables overcommit — allocations beyond `(swap + RAM × overcommit_ratio / 100)` fail immediately. This is what stops DataLoader from fork-bombing the box, but workloads that lean on overcommit (some JVM heap configurations, certain CUDA pinned-memory paths, large sparse `mmap`s) may surface `Cannot allocate memory` errors. Revisit these values per-workload if that happens.
 
-### Enable zswap
+### Enable zswap and NVIDIA KMS
 
-Edit `/etc/default/grub` and set:
+Edit `/etc/default/grub` and set. **`nvidia-drm.modeset=1` is critical** — without it, the NVIDIA proprietary driver loses the monitor's HPD signal when transitioning from the kernel framebuffer to Xorg, and the physical screen goes permanently dark after the boot splash. This enables NVIDIA's Kernel Mode Setting for a clean handoff.
 
 ```text
-GRUB_CMDLINE_LINUX_DEFAULT="quiet splash zswap.enabled=1 zswap.shrinker_enabled=1 zswap.compressor=lz4 zswap.max_pool_percent=30 zswap.accept_threshold_percent=80 zswap.zpool=zsmalloc"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash nvidia-drm.modeset=1 zswap.enabled=1 zswap.shrinker_enabled=1 zswap.compressor=lz4 zswap.max_pool_percent=30 zswap.accept_threshold_percent=80 zswap.zpool=zsmalloc"
 ```
 
 ```bash
@@ -827,9 +827,9 @@ Prevent the machine from sleeping/suspending (critical for long-running ML jobs)
 sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
 ```
 
-Disable all screen blanking and DPMS. **Do not set a screen-off timeout.** The NVIDIA proprietary driver combined with `nvidia-persistenced` does not reliably restore the display signal after DPMS-off — the monitor shows "No Signal" and physical input does not wake it. For an always-on ML workstation the correct posture is to never cut the display signal.
+Disable all screen blanking and DPMS. **Do not set a screen-off timeout.** Without `nvidia-drm.modeset=1` (set in Phase 6's GRUB cmdline), the proprietary NVIDIA driver loses the monitor's HPD (Hot Plug Detect) signal when transitioning from the kernel framebuffer to Xorg — the screen goes dark immediately after the Mint splash and never recovers. With KMS enabled, the handoff is seamless, but DPMS can still cut the display signal after idle if not disabled. For an always-on ML workstation the correct posture is to never cut the display signal.
 
-Two layers of protection:
+Two layers of protection (on top of the `nvidia-drm.modeset=1` from Phase 6):
 
 **Layer 1 — Cinnamon/dconf** (disables the Cinnamon power and screensaver timers):
 
@@ -1017,6 +1017,7 @@ Run a comprehensive check of everything:
 - systemd limits are active (check with systemctl show) — `MemoryHigh` shows 95% of RAM and `MemoryMax` shows 97% of RAM (not the old 70/85% values)
 - `/etc/sysctl.d/99-ml-workstation.conf` exists and values are applied (`sysctl vm.swappiness vm.overcommit_memory vm.overcommit_ratio vm.min_free_kbytes`)
 - zswap is enabled at runtime (`cat /sys/module/zswap/parameters/enabled` shows `Y` — only after the GRUB reboot)
+- `nvidia-drm.modeset=1` is active (`cat /sys/module/nvidia_drm/parameters/modeset` shows `Y`)
 - `earlyoom` service is active and enabled (`systemctl is-active earlyoom && systemctl is-enabled earlyoom`)
 - podman GPU test passes (run as regular user, not sudo)
 - nvitop is accessible by regular users (check permissions on /opt/pipx)
