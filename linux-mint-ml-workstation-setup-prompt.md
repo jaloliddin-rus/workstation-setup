@@ -1054,6 +1054,34 @@ sudo sed -i \
   /etc/xrdp/sesman.ini
 ```
 
+### Before restarting xrdp: check for active RDP sessions
+
+Restarting `xrdp` also restarts `xrdp-sesman`. If users have active or disconnected RDP desktops at that moment, their Xorg/Cinnamon processes can survive while the new `xrdp-sesman` loses its in-memory session table. The next login then creates a fresh display (for example `:11`) instead of reconnecting to the old one (for example `:10`), and Cinnamon may exit immediately because the old desktop is still alive.
+
+Before restarting xrdp, check for existing RDP sessions:
+
+```bash
+loginctl list-sessions --no-legend
+
+loginctl list-sessions --no-legend | awk '{print $1}' | while read -r sid; do
+    service="$(loginctl show-session "$sid" -p Service --value 2>/dev/null || true)"
+    if [ "$service" = "xrdp-sesman" ]; then
+        name="$(loginctl show-session "$sid" -p Name --value 2>/dev/null || true)"
+        display="$(loginctl show-session "$sid" -p Display --value 2>/dev/null || true)"
+        state="$(loginctl show-session "$sid" -p State --value 2>/dev/null || true)"
+        printf 'RDP session: id=%s user=%s display=%s state=%s\n' "$sid" "$name" "$display" "$state"
+    fi
+done
+```
+
+If any RDP sessions are listed, **pause and warn users**. Ask them to log out from the remote desktop, or terminate only the RDP login session before restarting xrdp:
+
+```bash
+sudo loginctl terminate-session <session-id>
+```
+
+Do not broadly `pkill -u <username>` here — that can kill the user's SSH sessions, tmux sessions, and training jobs. The targeted `loginctl terminate-session <session-id>` clears only that RDP GUI session.
+
 ### Apply and verify
 
 ```bash
@@ -1074,12 +1102,14 @@ sudo journalctl -u xrdp --since "5 minutes ago" --no-pager | grep -F "Cannot rea
 If a user can't reconnect because a session is wedged, this is much lighter than a reboot:
 
 ```bash
-sudo pkill -9 -u <username> -f 'Xorg|xrdp-chansrv|xrdp-sesman'
-sudo systemctl restart user@$(id -u <username>).service
+loginctl list-sessions --no-legend
+
+# Find the user's RDP session ID, then terminate only that RDP login session:
+sudo loginctl terminate-session <session-id>
 sudo systemctl restart xrdp
 ```
 
-This clears orphan processes, resets the user's systemd/dbus runtime (the thing that prevents Cinnamon from restarting cleanly), and restarts xrdp. If that still doesn't help, check `~/.xsession-errors` and `/var/log/xrdp-sesman.log` — a `Window manager exited quickly` line in the sesman log means `startwm.sh` is dying and the real reason will be in xsession-errors.
+This clears the wedged RDP GUI session without touching the user's SSH sessions, tmux sessions, or training jobs. If that still doesn't help, check `~/.xsession-errors` and `/var/log/xrdp-sesman.log` — a `Window manager exited quickly` line in the sesman log means `startwm.sh` is dying and the real reason will be in xsession-errors. If the session remains visible as `closing` in `loginctl` but no `Xorg :1x`, `xrdp-chansrv`, or Cinnamon process remains for it, it is usually safe to ignore and retry the RDP login.
 
 Cinnamon's compositor is genuinely heavy over RDP. If a machine consistently feels slow despite the tuning above, swapping the user session to MATE or XFCE is the next lever, but is not part of the default setup.
 
@@ -1128,6 +1158,7 @@ Run a comprehensive check of everything:
 - xrdp is running and enabled (systemctl status xrdp)
 - `xrdp` is in the `ssl-cert` group (`id xrdp | grep ssl-cert`) and can read its TLS key (`sudo -u xrdp test -r /etc/xrdp/key.pem`)
 - No new xrdp log entries say `Cannot read private key file` after the xrdp restart
+- Before the xrdp restart, any active `xrdp-sesman` loginctl sessions were identified and users were warned or the RDP GUI sessions were terminated with `sudo loginctl terminate-session <session-id>`; no orphaned `Xorg :1x`, `xrdp-chansrv`, or Cinnamon RDP session remains afterward
 - UFW allows port 3389/tcp
 - `/etc/xrdp/xrdp.ini` has `crypt_level=low`, `tcp_send_buffer_bytes=4194304`, `tcp_recv_buffer_bytes=4194304` in `[Globals]`
 - `[Xorg]` section appears before `[Xvnc]` in `/etc/xrdp/xrdp.ini` (`grep -n '^\[Xorg\]\|^\[Xvnc\]' /etc/xrdp/xrdp.ini`)
