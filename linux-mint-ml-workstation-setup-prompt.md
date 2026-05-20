@@ -831,10 +831,32 @@ Disable all screen blanking and DPMS. **Do not set a screen-off timeout.** Witho
 
 Two layers of protection (on top of the `nvidia-drm.modeset=1` from Phase 6):
 
-**Layer 1 — Cinnamon/dconf** (disables the Cinnamon power and screensaver timers):
+**Layer 1 — Cinnamon/dconf** (disables the Cinnamon power and screensaver timers, and locks those keys so users cannot re-enable screen blanking):
+
+**Important dconf gotcha:** `/etc/dconf/db/local.d` is a keyfile directory, not a backup directory. `dconf update` compiles every keyfile in that directory, including files named `*.bak`, `*.bak.<timestamp>`, or editor leftovers. If an old backup containing `sleep-display-ac=1800` remains there, it can override the new `0` value and the lock will enforce the wrong setting. Put backups in `/etc/dconf/backups` or `/root`, never inside `/etc/dconf/db/local.d`.
 
 ```bash
-sudo mkdir -p /etc/dconf/profile /etc/dconf/db/local.d
+sudo mkdir -p /etc/dconf/profile /etc/dconf/db/local.d /etc/dconf/backups
+
+# If re-running this phase, back up the active keyfile outside local.d.
+if [ -f /etc/dconf/db/local.d/01-power ]; then
+  sudo cp -a /etc/dconf/db/local.d/01-power "/etc/dconf/backups/01-power.$(date +%Y%m%d%H%M%S)"
+fi
+
+# local.d must contain only active dconf keyfiles and the locks directory.
+# Move accidental backups/editor leftovers out before compiling the database.
+sudo find /etc/dconf/db/local.d -maxdepth 1 -type f \
+  \( -name '*.bak' -o -name '*.bak.*' -o -name '*~' \) \
+  -exec mv -t /etc/dconf/backups {} +
+
+# If this phase is being re-run, temporarily remove the old lock before
+# clearing stale per-user overrides. A locked key cannot be reset cleanly.
+sudo mkdir -p /etc/dconf/db/local.d/locks
+if [ -f /etc/dconf/db/local.d/locks/power ]; then
+  sudo cp -a /etc/dconf/db/local.d/locks/power "/etc/dconf/backups/power-lock.$(date +%Y%m%d%H%M%S)"
+  sudo rm -f /etc/dconf/db/local.d/locks/power
+  sudo dconf update
+fi
 
 echo -e "user-db:user\nsystem-db:local" | sudo tee /etc/dconf/profile/user > /dev/null
 sudo chmod 644 /etc/dconf/profile/user
@@ -848,6 +870,37 @@ sleep-display-battery=0
 idle-delay=uint32 0
 EOF
 sudo chmod 644 /etc/dconf/db/local.d/01-power
+
+# Clear stale per-user overrides for existing users before installing locks.
+# This is safe for new users and avoids old 900/1800-second settings surviving
+# underneath a now-locked key.
+getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 && $7 !~ /(nologin|false)$/ {print $1, $3}' | \
+while read -r user uid; do
+    if [ -S "/run/user/$uid/bus" ]; then
+        sudo -u "$user" env DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+            dconf reset /org/cinnamon/settings-daemon/plugins/power/sleep-display-ac || true
+        sudo -u "$user" env DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+            dconf reset /org/cinnamon/settings-daemon/plugins/power/sleep-display-battery || true
+        sudo -u "$user" env DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+            dconf reset /org/cinnamon/desktop/session/idle-delay || true
+    else
+        sudo -u "$user" dbus-run-session -- \
+            dconf reset /org/cinnamon/settings-daemon/plugins/power/sleep-display-ac || true
+        sudo -u "$user" dbus-run-session -- \
+            dconf reset /org/cinnamon/settings-daemon/plugins/power/sleep-display-battery || true
+        sudo -u "$user" dbus-run-session -- \
+            dconf reset /org/cinnamon/desktop/session/idle-delay || true
+    fi
+done
+
+sudo mkdir -p /etc/dconf/db/local.d/locks
+sudo tee /etc/dconf/db/local.d/locks/power > /dev/null << 'EOF'
+/org/cinnamon/settings-daemon/plugins/power/sleep-display-ac
+/org/cinnamon/settings-daemon/plugins/power/sleep-display-battery
+/org/cinnamon/desktop/session/idle-delay
+EOF
+sudo chmod 755 /etc/dconf/db/local.d/locks
+sudo chmod 644 /etc/dconf/db/local.d/locks/power
 
 sudo dconf update
 sudo chmod 644 /etc/dconf/db/local
@@ -883,10 +936,30 @@ sudo systemctl restart lightdm
 
 Verify:
 ```bash
-gsettings get org.cinnamon.settings-daemon.plugins.power sleep-display-ac
-# → 0
-gsettings get org.cinnamon.desktop.session idle-delay
-# → uint32 0
+# local.d should contain only active keyfiles plus the locks directory:
+find /etc/dconf/db/local.d -maxdepth 1 -type f -name '*.bak*' -print
+# → no output
+
+# Verify for each existing regular user:
+getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 && $7 !~ /(nologin|false)$/ {print $1, $3}' | \
+while read -r user uid; do
+    if [ -S "/run/user/$uid/bus" ]; then
+        bus="DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus"
+        sudo -u "$user" env $bus gsettings get org.cinnamon.settings-daemon.plugins.power sleep-display-ac
+        sudo -u "$user" env $bus gsettings get org.cinnamon.settings-daemon.plugins.power sleep-display-battery
+        sudo -u "$user" env $bus gsettings get org.cinnamon.desktop.session idle-delay
+        sudo -u "$user" env $bus gsettings writable org.cinnamon.settings-daemon.plugins.power sleep-display-ac
+        sudo -u "$user" env $bus gsettings writable org.cinnamon.desktop.session idle-delay
+    else
+        sudo -u "$user" dbus-run-session -- gsettings get org.cinnamon.settings-daemon.plugins.power sleep-display-ac
+        sudo -u "$user" dbus-run-session -- gsettings get org.cinnamon.settings-daemon.plugins.power sleep-display-battery
+        sudo -u "$user" dbus-run-session -- gsettings get org.cinnamon.desktop.session idle-delay
+        sudo -u "$user" dbus-run-session -- gsettings writable org.cinnamon.settings-daemon.plugins.power sleep-display-ac
+        sudo -u "$user" dbus-run-session -- gsettings writable org.cinnamon.desktop.session idle-delay
+    fi
+done
+# Each user should show: 0, 0, uint32 0, false, false.
+
 # Confirm lightdm ran the script at startup (look for exit status 0):
 sudo grep "no-dpms" /var/log/lightdm/lightdm.log | tail -3
 ```
@@ -916,6 +989,12 @@ Install xrdp so users can connect via RDP from Windows, macOS, or Linux:
 sudo apt install -y xrdp
 sudo systemctl enable xrdp
 sudo ufw allow 3389/tcp
+
+# xrdp's default key.pem symlinks to /etc/ssl/private/ssl-cert-snakeoil.key,
+# which is root:ssl-cert 640 inside a root:ssl-cert 710 directory. Without this
+# group membership, xrdp logs "Cannot read private key file /etc/xrdp/key.pem"
+# and TLS-capable clients either fail or fall back to plain RDP.
+sudo adduser xrdp ssl-cert
 ```
 
 Out of the box, xrdp on Linux Mint is sluggish over the network and orphans sessions when the client window closes (subsequent reconnects spawn fresh sessions instead of reattaching). Tune `xrdp.ini` and `sesman.ini` before users start connecting.
@@ -984,6 +1063,10 @@ sudo systemctl status xrdp | grep Active
 sudo ufw status | grep 3389
 grep -E '^(crypt_level|tcp_send_buffer_bytes|tcp_recv_buffer_bytes)=' /etc/xrdp/xrdp.ini
 grep -E '^(KillDisconnected|DisconnectedTimeLimit|IdleTimeLimit|Policy)=' /etc/xrdp/sesman.ini
+id xrdp | grep ssl-cert
+sudo -u xrdp test -r /etc/xrdp/key.pem && echo "xrdp TLS key readable"
+sudo journalctl -u xrdp --since "5 minutes ago" --no-pager | grep -F "Cannot read private key file" && \
+  echo "Investigate xrdp TLS key permissions" || true
 ```
 
 ### Troubleshooting stuck sessions
@@ -1036,11 +1119,15 @@ Run a comprehensive check of everything:
 - `/etc/skel/Desktop`, `/etc/skel/.config/autostart`, and `/etc/skel/.config/gtk-3.0` are readable/traversable by future users (chmod 755)
 - Sleep/suspend/hibernate targets are masked (systemctl status sleep.target should show "masked")
 - dconf profile and power config are chmod 644 (no permission warnings)
-- Screen blanking is disabled: `gsettings get org.cinnamon.settings-daemon.plugins.power sleep-display-ac` prints `0` and `gsettings get org.cinnamon.desktop.session idle-delay` prints `uint32 0`
+- `/etc/dconf/db/local.d/locks` is chmod 755 and `/etc/dconf/db/local.d/locks/power` is chmod 644
+- No backup/editor files exist directly inside `/etc/dconf/db/local.d` (`find /etc/dconf/db/local.d -maxdepth 1 -type f -name '*.bak*' -print` shows no output). Backups belong in `/etc/dconf/backups`.
+- Screen blanking is disabled and locked for every existing regular user: `sleep-display-ac` prints `0`, `sleep-display-battery` prints `0`, `idle-delay` prints `uint32 0`, and `gsettings writable ... sleep-display-ac` plus `gsettings writable ... idle-delay` both print `false`
 - `/usr/local/bin/x11-no-dpms.sh` exists and is chmod 755
 - `/etc/lightdm/lightdm.conf.d/50-no-dpms.conf` exists and is chmod 644
 - lightdm log confirms the script ran at startup with exit status 0 (`sudo grep "no-dpms" /var/log/lightdm/lightdm.log | tail -3`)
 - xrdp is running and enabled (systemctl status xrdp)
+- `xrdp` is in the `ssl-cert` group (`id xrdp | grep ssl-cert`) and can read its TLS key (`sudo -u xrdp test -r /etc/xrdp/key.pem`)
+- No new xrdp log entries say `Cannot read private key file` after the xrdp restart
 - UFW allows port 3389/tcp
 - `/etc/xrdp/xrdp.ini` has `crypt_level=low`, `tcp_send_buffer_bytes=4194304`, `tcp_recv_buffer_bytes=4194304` in `[Globals]`
 - `[Xorg]` section appears before `[Xvnc]` in `/etc/xrdp/xrdp.ini` (`grep -n '^\[Xorg\]\|^\[Xvnc\]' /etc/xrdp/xrdp.ini`)
