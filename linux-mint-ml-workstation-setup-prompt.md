@@ -178,59 +178,80 @@ ls -ld /home/<username>
 ## Phase 5: Shared data folder
 
 **Base the location on Phase 0 disk findings:**
-- If a secondary drive exists and is mounted (e.g., `/data`), put shared data there with a symlink from `/srv/shared`.
-- If no secondary drive, use `/srv/shared` on the primary disk.
+- If a secondary drive or large storage mount exists (for example `/data`), use it as `DATA_ROOT`.
+- If no secondary drive exists, choose a root-owned local directory such as `/srv/data` as `DATA_ROOT`; `/srv/shared` should still be the stable shared-folder path exposed to users.
 - If a secondary drive exists but isn't mounted, ask me about it.
+
+`DATA_ROOT` is machine-specific, but the visibility policy is not: standard users must not browse or list the raw storage root. They should only see:
+- `Shared Data` -> `/srv/shared`
+- `My Data Storage` -> `USER_DATA_BASE/<username>`
 
 **If using a secondary drive:** add `acl` to its `/etc/fstab` entry and remount.
 
 ```bash
-sudo groupadd labshared
+DATA_ROOT=/data
+USER_DATA_BASE="$DATA_ROOT/users"
+
+sudo groupadd -f labshared
 
 # Add ALL users (existing + new). NEVER omit -a from -aG:
 sudo usermod -aG labshared <user1>
 sudo usermod -aG labshared <user2>
 # ... repeat for all users
 
-# Create directory (path depends on disk decision):
-sudo mkdir -p /data/shared         # or /srv/shared
-sudo ln -s /data/shared /srv/shared  # symlink if on secondary drive
-sudo chown root:labshared /data/shared
-sudo chmod 2770 /data/shared       # setgid bit
+# DATA_ROOT must be traversable but not listable by standard users.
+sudo install -d -m 0711 -o root -g root "$DATA_ROOT"
+sudo setfacl -m g:sudo:rwx "$DATA_ROOT" 2>/dev/null || true
+
+# Create shared directory under DATA_ROOT and expose it via stable /srv/shared.
+sudo install -d -m 2770 -o root -g labshared "$DATA_ROOT/shared"
+if [ ! -e /srv/shared ]; then
+  sudo ln -s "$DATA_ROOT/shared" /srv/shared
+fi
+sudo chown root:labshared "$DATA_ROOT/shared"
+sudo chmod 2770 "$DATA_ROOT/shared"       # setgid bit
 
 # ACL so new files are group-readable despite umask 077:
 sudo apt install -y acl
-sudo setfacl -d -m g:labshared:rwx /data/shared
-sudo setfacl -m g:labshared:rwx /data/shared
+sudo setfacl -d -m g:labshared:rwx "$DATA_ROOT/shared"
+sudo setfacl -m g:labshared:rwx "$DATA_ROOT/shared"
 
-getfacl /data/shared
+getfacl "$DATA_ROOT/shared"
 ```
 
 Note: group membership takes effect on next login.
 
 ---
 
-## Phase 5b: Per-user directories on secondary drive
+## Phase 5b: Per-user directories on large storage
 
-Create private per-user directories on the secondary drive so users have overflow storage:
+Create private per-user directories on large storage so users have overflow storage for datasets, checkpoints, archives, and other files that should not live in `/home`.
+
+Use the same `DATA_ROOT` selected in Phase 5. `USER_DATA_BASE` should usually be `DATA_ROOT/users`. Standard users must be able to traverse to their own directory but must not list `DATA_ROOT` or `USER_DATA_BASE`.
 
 ```bash
-sudo mkdir -p /mnt/data/users
-sudo chmod 755 /mnt/data/users
+DATA_ROOT=/data
+USER_DATA_BASE="$DATA_ROOT/users"
+
+sudo install -d -m 0711 -o root -g root "$DATA_ROOT"
+sudo install -d -m 0711 -o root -g root "$USER_DATA_BASE"
+sudo setfacl -m g:sudo:rwx "$DATA_ROOT" "$USER_DATA_BASE" 2>/dev/null || true
 
 # For each existing user:
-sudo mkdir -p /mnt/data/users/<username>
-sudo chown <username>:<username> /mnt/data/users/<username>
-sudo chmod 700 /mnt/data/users/<username>
+sudo install -d -m 0700 -o <username> -g <username> "$USER_DATA_BASE/<username>"
 ```
 
 Auto-create for future users on first login:
 ```bash
 sudo tee /etc/profile.d/user-data-dir.sh > /dev/null << 'EOF'
-if [ "$(id -u)" -ge 1000 ] && [ -d /mnt/data/users ] && [ -z "$_USER_DATA_DIR_DONE" ]; then
+DATA_ROOT=/data
+USER_DATA_BASE="$DATA_ROOT/users"
+
+if [ "$(id -u)" -ge 1000 ] && [ -d "$USER_DATA_BASE" ] && [ -z "$_USER_DATA_DIR_DONE" ]; then
     _USER_DATA_DIR_DONE=1
     export _USER_DATA_DIR_DONE
-    USER_DATA="/mnt/data/users/$(id -un)"
+    USERNAME="$(id -un)"
+    USER_DATA="$USER_DATA_BASE/$USERNAME"
 
     if [ ! -d "$USER_DATA" ]; then
         mkdir -p "$USER_DATA"
@@ -241,7 +262,7 @@ if [ "$(id -u)" -ge 1000 ] && [ -d /mnt/data/users ] && [ -z "$_USER_DATA_DIR_DO
         cat > "$HOME/Desktop/my-data.desktop" << INNER
 [Desktop Entry]
 Name=My Data Storage
-Comment=Your personal directory on the secondary drive (/mnt/data)
+Comment=Your private large-storage folder
 Exec=nemo $USER_DATA
 Icon=folder
 Terminal=false
@@ -250,18 +271,52 @@ INNER
         chmod 755 "$HOME/Desktop/my-data.desktop"
     fi
 
-    if [ -d "$HOME/.config/gtk-3.0" ] && ! grep -q "/mnt/data/users/" "$HOME/.config/gtk-3.0/bookmarks" 2>/dev/null; then
-        echo "file://$USER_DATA My Data Storage" >> "$HOME/.config/gtk-3.0/bookmarks"
+    mkdir -p "$HOME/.config/gtk-3.0"
+    if ! id -nG "$USERNAME" 2>/dev/null | tr ' ' '\n' | grep -qx sudo; then
+        cat > "$HOME/.config/gtk-3.0/bookmarks" << INNER
+file:///srv/shared Shared Data
+file://$USER_DATA My Data Storage
+INNER
+    else
+        grep -qxF "file://$USER_DATA My Data Storage" "$HOME/.config/gtk-3.0/bookmarks" 2>/dev/null || \
+            echo "file://$USER_DATA My Data Storage" >> "$HOME/.config/gtk-3.0/bookmarks"
     fi
 fi
 EOF
 sudo chmod 644 /etc/profile.d/user-data-dir.sh
 ```
 
-Add desktop shortcut and file manager bookmark for each existing user:
+Add desktop shortcut and file manager bookmark for each existing standard user. Do not bookmark `DATA_ROOT` itself.
 ```bash
-# For each user, create ~/Desktop/my-data.desktop pointing to /mnt/data/users/<username>
-# and append bookmark to ~/.config/gtk-3.0/bookmarks
+DATA_ROOT=/data
+USER_DATA_BASE="$DATA_ROOT/users"
+
+# For each standard user:
+user=<username>
+home_dir="/home/$user"
+user_data="$USER_DATA_BASE/$user"
+
+sudo install -d -m 0700 -o "$user" -g "$user" "$user_data"
+sudo install -d -m 0755 -o "$user" -g "$user" "$home_dir/.config/gtk-3.0"
+sudo install -d -m 0755 -o "$user" -g "$user" "$home_dir/Desktop"
+sudo tee "$home_dir/.config/gtk-3.0/bookmarks" > /dev/null << EOF
+file:///srv/shared Shared Data
+file://$user_data My Data Storage
+EOF
+sudo chown "$user:$user" "$home_dir/.config/gtk-3.0/bookmarks"
+sudo chmod 644 "$home_dir/.config/gtk-3.0/bookmarks"
+
+sudo tee "$home_dir/Desktop/my-data.desktop" > /dev/null << EOF
+[Desktop Entry]
+Name=My Data Storage
+Comment=Your private large-storage folder
+Exec=nemo $user_data
+Icon=folder
+Terminal=false
+Type=Application
+EOF
+sudo chown "$user:$user" "$home_dir/Desktop/my-data.desktop"
+sudo chmod 755 "$home_dir/Desktop/my-data.desktop"
 ```
 
 ---
@@ -288,13 +343,16 @@ Skip admin users — they have no limit.
 Deploy a login warning so users see a message every terminal session when they are over quota:
 ```bash
 sudo tee /etc/profile.d/quota-warn.sh > /dev/null << 'EOF'
+DATA_ROOT=/data
+USER_DATA_BASE="$DATA_ROOT/users"
+
 if [ "$(id -u)" -ge 1000 ] && command -v quota >/dev/null 2>&1; then
     _quota_out="$(quota -s 2>/dev/null)"
     if printf '%s\n' "$_quota_out" | grep -q '\*'; then
         _used="$(printf '%s\n' "$_quota_out" | awk '/\*/ {gsub(/\*/, "", $2); print $2}')"
         _soft="$(printf '%s\n' "$_quota_out" | awk '/\*/ {print $3}')"
         printf '\n*** Disk quota warning: you are using %s of your %s soft limit on /home.\n' "$_used" "$_soft"
-        printf '    Move large files to /data/users/%s to free space.\n' "$(id -un)"
+        printf '    Move large files to %s/%s to free space.\n' "$USER_DATA_BASE" "$(id -un)"
         printf '    Run: quota -s   for details.\n\n'
     fi
     unset _quota_out _used _soft
@@ -311,16 +369,18 @@ sudo tee /usr/local/sbin/adduser.local > /dev/null << 'EOF'
 USERNAME="$1"
 UID_NUM="$2"
 HOME_DIR="$4"
+DATA_ROOT=/data
+USER_DATA_BASE="$DATA_ROOT/users"
 
 [ "$UID_NUM" -ge 1000 ] || exit 0
 
 usermod -aG labshared "$USERNAME" 2>/dev/null
 setquota -u "$USERNAME" 200G 0 0 0 / 2>/dev/null
 
-if [ -d /mnt/data/users ]; then
-    mkdir -p "/mnt/data/users/$USERNAME"
-    chown "$USERNAME:$USERNAME" "/mnt/data/users/$USERNAME"
-    chmod 700 "/mnt/data/users/$USERNAME"
+if [ -d "$USER_DATA_BASE" ]; then
+    mkdir -p "$USER_DATA_BASE/$USERNAME"
+    chown "$USERNAME:$USERNAME" "$USER_DATA_BASE/$USERNAME"
+    chmod 700 "$USER_DATA_BASE/$USERNAME"
 fi
 
 if [ -d "$HOME_DIR" ]; then
@@ -337,6 +397,30 @@ INNER
     chown -R "$USERNAME:$USERNAME" "$HOME_DIR/.config"
     chmod 755 "$HOME_DIR/.config" "$HOME_DIR/.config/autostart" 2>/dev/null || true
     chmod 644 "$HOME_DIR/.config/autostart/mintupdate.desktop" 2>/dev/null || true
+
+    if [ -d "$USER_DATA_BASE" ]; then
+        mkdir -p "$HOME_DIR/.config/gtk-3.0"
+        cat > "$HOME_DIR/.config/gtk-3.0/bookmarks" << INNER
+file:///srv/shared Shared Data
+file://$USER_DATA_BASE/$USERNAME My Data Storage
+INNER
+
+        if [ -d "$HOME_DIR/Desktop" ]; then
+            cat > "$HOME_DIR/Desktop/my-data.desktop" << INNER
+[Desktop Entry]
+Name=My Data Storage
+Comment=Your private large-storage folder
+Exec=nemo $USER_DATA_BASE/$USERNAME
+Icon=folder
+Terminal=false
+Type=Application
+INNER
+            chmod 755 "$HOME_DIR/Desktop/my-data.desktop" 2>/dev/null || true
+        fi
+
+        chown -R "$USERNAME:$USERNAME" "$HOME_DIR/.config/gtk-3.0" "$HOME_DIR/Desktop/my-data.desktop" 2>/dev/null || true
+        chmod 644 "$HOME_DIR/.config/gtk-3.0/bookmarks" 2>/dev/null || true
+    fi
 fi
 
 sudo -H -u "$USERNAME" dbus-run-session gsettings set com.linuxmint.updates auto-update-flatpaks false 2>/dev/null || true
@@ -355,7 +439,8 @@ sudo chmod 755 /usr/local/sbin/adduser.local
 This eliminates all manual steps when creating users — `sudo adduser <username>` now automatically:
 - Adds user to `labshared` group
 - Sets 200G soft quota on /home
-- Creates private `/mnt/data/users/<username>` directory
+- Creates private `USER_DATA_BASE/<username>` directory
+- Adds only `Shared Data` and `My Data Storage` file-manager/start-menu places for standard users
 - Hides Update Manager and disables per-login Mint update behavior for standard users
 
 ---
@@ -896,7 +981,7 @@ sudo systemctl restart polkit
 Use the same onboarding structure on every workstation. Start from `linux-mint-onboarding-template.md` in this repository and fill only the machine-specific placeholders:
 - `HOSTNAME`, `OS_VERSION`, `CPU_SUMMARY`, `RAM_SUMMARY`, `GPU_SUMMARY`, `NVIDIA_DRIVER`, `DRIVER_CUDA`, `CUDA_TOOLKIT`
 - `ADMIN_CONTACT`, `HOME_QUOTA`, `DATA_DRIVE_TOTAL`
-- `USER_DATA_BASE` — the base path for per-user overflow dirs (e.g. `/data/users` or `/mnt/data/users`)
+- `USER_DATA_BASE` — the base path for per-user overflow dirs (for example `/data/users`, or another machine-specific large-storage path)
 - `EXTRA_STORAGE_LOCATION`, `EXTRA_STORAGE_DESCRIPTION` — any additional storage row in the table
 - `CPU_LIMIT`, `MEMORY_HIGH`, `MEMORY_MAX`, `TASKS_MAX`
 
@@ -942,8 +1027,14 @@ sudo chmod 755 /etc/skel/Desktop/shared-folder.desktop
 # sudo chown -R <user>:<user> /home/<user>/Desktop
 ```
 
-Add shared folder bookmark to file manager sidebar:
+Configure standard-user file manager bookmarks and Cinnamon start-menu places. The left side of the Cinnamon menu should not expose the raw storage mount or generic home folders for standard users; it should show only:
+- `Shared Data` -> `/srv/shared`
+- `My Data Storage` -> `USER_DATA_BASE/<username>`
+
 ```bash
+DATA_ROOT=/data
+USER_DATA_BASE="$DATA_ROOT/users"
+
 # For future users via skel:
 sudo mkdir -p /etc/skel/.config/gtk-3.0
 sudo chmod 755 /etc/skel/.config /etc/skel/.config/gtk-3.0
@@ -952,10 +1043,61 @@ file:///srv/shared Shared Data
 EOF
 sudo chmod 644 /etc/skel/.config/gtk-3.0/bookmarks
 
-# For existing new users:
-# sudo mkdir -p /home/<user>/.config/gtk-3.0
-# sudo bash -c 'echo "file:///srv/shared Shared Data" >> /home/<user>/.config/gtk-3.0/bookmarks'
-# sudo chown -R <user>:<user> /home/<user>/.config/gtk-3.0
+# Prepare future-user Cinnamon menu settings.
+# Prefer a known-good admin menu config when available; otherwise start from the packaged schema.
+MENU_SOURCE=/usr/share/cinnamon/applets/menu@cinnamon.org/settings-schema.json
+if [ -f /home/<admin-user>/.config/cinnamon/spices/menu@cinnamon.org/0.json ]; then
+  MENU_SOURCE=/home/<admin-user>/.config/cinnamon/spices/menu@cinnamon.org/0.json
+fi
+
+sudo install -D -m 644 "$MENU_SOURCE" /etc/skel/.config/cinnamon/spices/menu@cinnamon.org/0.json
+sudo python3 - << 'PY'
+import json
+
+path = "/etc/skel/.config/cinnamon/spices/menu@cinnamon.org/0.json"
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+values = {
+    "show-sidebar": True,
+    "show-home": False,
+    "show-desktop": False,
+    "show-documents": False,
+    "show-downloads": False,
+    "show-music": False,
+    "show-pictures": False,
+    "show-videos": False,
+    "show-bookmarks": True,
+}
+
+for key, value in values.items():
+    data.setdefault(key, {})
+    data[key]["value"] = value
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=4)
+    f.write("\n")
+PY
+sudo chown root:root /etc/skel/.config/cinnamon/spices/menu@cinnamon.org/0.json
+sudo chmod 644 /etc/skel/.config/cinnamon/spices/menu@cinnamon.org/0.json
+
+# For each existing standard user:
+for user in <standard-user-1> <standard-user-2>; do
+  home_dir="$(getent passwd "$user" | cut -d: -f6)"
+  user_data="$USER_DATA_BASE/$user"
+
+  sudo install -d -m 755 -o "$user" -g "$user" "$home_dir/.config/gtk-3.0"
+  sudo tee "$home_dir/.config/gtk-3.0/bookmarks" > /dev/null << EOF
+file:///srv/shared Shared Data
+file://$user_data My Data Storage
+EOF
+  sudo chown "$user:$user" "$home_dir/.config/gtk-3.0/bookmarks"
+  sudo chmod 644 "$home_dir/.config/gtk-3.0/bookmarks"
+
+  sudo install -D -m 644 -o "$user" -g "$user" \
+    /etc/skel/.config/cinnamon/spices/menu@cinnamon.org/0.json \
+    "$home_dir/.config/cinnamon/spices/menu@cinnamon.org/0.json"
+done
 ```
 
 Auto-open onboarding on first login:
@@ -1305,7 +1447,8 @@ Run a comprehensive check of everything:
 - conda works for each new user (test with interactive shell: `sudo su - <user> -c 'bash -ic "conda --version"'`)
 - onboarding desktop shortcut exists for all users, owned by the user, chmod 755
 - shared-folder desktop shortcut exists for all users, owned by the user, chmod 755
-- shared folder bookmark in file manager for all users
+- standard users have exactly the intended storage bookmarks in the file manager: `Shared Data` -> `/srv/shared` and `My Data Storage` -> `USER_DATA_BASE/<username>`; no raw `DATA_ROOT` bookmark
+- standard users' Cinnamon start-menu left pane hides Home/Desktop/Documents/Downloads/Music/Pictures/Videos and keeps bookmarks enabled, so the visible storage shortcuts are only `Shared Data` and `My Data Storage`
 - autostart onboarding.desktop is chmod 644 (NOT 600)
 - polkit power rules file is chmod 644 (NOT 600)
 - Timeshift is configured with Daily and Boot snapshots, home directories excluded, and at least one manual snapshot exists before automatic updates are enabled
@@ -1339,9 +1482,11 @@ Run a comprehensive check of everything:
 - `/etc/xrdp/sesman.ini` has `KillDisconnected=false`, `DisconnectedTimeLimit=0`, `IdleTimeLimit=0`, `Policy=Default` in `[Sessions]`
 - Backups exist at `/etc/xrdp/xrdp.ini.bak` and `/etc/xrdp/sesman.ini.bak`
 - Node.js and npm are installed system-wide (`node --version`, `npm --version`)
-- Secondary drive is ext4 with `usrquota,acl` in fstab (`mount | grep /mnt/data`)
-- `/mnt/data` is chmod 755 (not 777)
-- `/mnt/data/users/` exists, chmod 755, with a private dir (700) per user
+- Large storage root is ext4 with `usrquota,acl` in fstab when it is a separate mount (`mount | grep <DATA_ROOT>`)
+- `DATA_ROOT` exists, is root-owned, and is traversable but not listable by standard users (typically chmod 711 plus an admin/sudo ACL)
+- `USER_DATA_BASE` exists, is root-owned, and is traversable but not listable by standard users (typically chmod 711 plus an admin/sudo ACL)
+- each `USER_DATA_BASE/<username>` directory is owned by that user and chmod 700
+- standard users cannot `ls DATA_ROOT` or `ls USER_DATA_BASE`, but can access `/srv/shared` and `USER_DATA_BASE/<username>`
 - Disk quotas are active (`repquota /` shows soft limits for standard users)
 - `/usr/local/sbin/adduser.local` exists, chmod 755, automates group + quota + data dir + standard-user update restrictions
 - `/etc/profile.d/user-data-dir.sh` is chmod 644
