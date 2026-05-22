@@ -323,6 +323,30 @@ if [ -d /mnt/data/users ]; then
     chmod 700 "/mnt/data/users/$USERNAME"
 fi
 
+if [ -d "$HOME_DIR" ]; then
+    mkdir -p "$HOME_DIR/.config/autostart"
+    if [ -f /etc/skel/.config/autostart/mintupdate.desktop ]; then
+        cp /etc/skel/.config/autostart/mintupdate.desktop "$HOME_DIR/.config/autostart/" 2>/dev/null || true
+    else
+        cat > "$HOME_DIR/.config/autostart/mintupdate.desktop" << INNER
+[Desktop Entry]
+X-GNOME-Autostart-enabled=false
+Hidden=true
+INNER
+    fi
+    chown -R "$USERNAME:$USERNAME" "$HOME_DIR/.config"
+    chmod 755 "$HOME_DIR/.config" "$HOME_DIR/.config/autostart" 2>/dev/null || true
+    chmod 644 "$HOME_DIR/.config/autostart/mintupdate.desktop" 2>/dev/null || true
+fi
+
+sudo -H -u "$USERNAME" dbus-run-session gsettings set com.linuxmint.updates auto-update-flatpaks false 2>/dev/null || true
+sudo -H -u "$USERNAME" dbus-run-session gsettings set com.linuxmint.updates auto-update-cinnamon-spices false 2>/dev/null || true
+sudo -H -u "$USERNAME" dbus-run-session gsettings set com.linuxmint.updates refresh-schedule-enabled false 2>/dev/null || true
+sudo -H -u "$USERNAME" dbus-run-session gsettings set com.linuxmint.updates tracker-disable-notifications true 2>/dev/null || true
+sudo -H -u "$USERNAME" dbus-run-session gsettings set com.linuxmint.updates hide-systray true 2>/dev/null || true
+sudo -H -u "$USERNAME" dbus-run-session gsettings set com.linuxmint.updates show-flatpak-updates false 2>/dev/null || true
+sudo -H -u "$USERNAME" dbus-run-session gsettings set com.linuxmint.updates show-cinnamon-updates false 2>/dev/null || true
+
 exit 0
 EOF
 sudo chmod 755 /usr/local/sbin/adduser.local
@@ -332,6 +356,7 @@ This eliminates all manual steps when creating users — `sudo adduser <username
 - Adds user to `labshared` group
 - Sets 200G soft quota on /home
 - Creates private `/mnt/data/users/<username>` directory
+- Hides Update Manager and disables per-login Mint update behavior for standard users
 
 ---
 
@@ -673,9 +698,84 @@ The script only looks at **compute** processes (`--query-compute-apps`), so idle
 
 ---
 
-## Phase 11: Restrict non-admin users
+## Phase 11: Automatic updates and standard-user restrictions
 
-Disable Update Manager autostart for non-admin users:
+Configure system snapshots before enabling automatic package updates. Linux Mint expects Timeshift to be configured so failed updates can be rolled back.
+
+Use **Timeshift**:
+- Open Menu -> Administration -> Timeshift, or run `pkexec timeshift-gtk`.
+- Select `RSYNC` unless the machine was intentionally installed on Btrfs.
+- Store snapshots on a drive with enough free space. Timeshift creates a `timeshift` directory and does not format the selected device.
+- Enable automated **Daily** and **Boot** snapshots.
+- Keep home directories excluded: `/root` and `/home/<users>` should stay **Exclude all files**. Timeshift is for OS rollback, not user-data backup.
+- Create one manual snapshot before enabling automatic updates.
+
+Enable Linux Mint's root-level automatic package updates. These run from systemd timers as root, so they continue as long as the machine is on, regardless of who is logged in:
+
+```bash
+sudo /usr/bin/mintupdate-automation upgrade enable
+sudo /usr/bin/mintupdate-automation autoremove enable
+```
+
+`autoremove` removes obsolete kernels and unused dependencies conservatively. Mint leaves the running kernel, leaves at least one older kernel, and does not remove manually installed kernels.
+
+If `systemctl` prints a warning that a helper unit has no installation config, that is OK as long as the timer symlink and marker file exist.
+
+Verify:
+```bash
+systemctl is-enabled mintupdate-automation-upgrade.timer
+systemctl list-timers mintupdate-automation-upgrade.timer
+test -e /var/lib/linuxmint/mintupdate-automatic-upgrades-enabled
+
+systemctl is-enabled mintupdate-automation-autoremove.timer
+systemctl list-timers mintupdate-automation-autoremove.timer
+test -e /var/lib/linuxmint/mintupdate-automatic-removals-enabled
+```
+
+Configure system Flatpak updates to run without relying on a user login. Cinnamon spice updates are per-user by design, so do not try to make them a root-level cross-user update job.
+
+```bash
+if command -v flatpak >/dev/null 2>&1; then
+  sudo tee /etc/systemd/system/flatpak-system-update.service > /dev/null << 'EOF'
+[Unit]
+Description=Automatic system Flatpak updates
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flatpak update --system --noninteractive --assumeyes
+EOF
+
+  sudo tee /etc/systemd/system/flatpak-system-update.timer > /dev/null << 'EOF'
+[Unit]
+Description=Run automatic system Flatpak updates
+
+[Timer]
+OnCalendar=daily
+OnStartupSec=90m
+RandomizedDelaySec=60m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  sudo chmod 644 /etc/systemd/system/flatpak-system-update.service
+  sudo chmod 644 /etc/systemd/system/flatpak-system-update.timer
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now flatpak-system-update.timer
+fi
+```
+
+For the admin/operator account only, enable Mint's per-login Flatpak and Cinnamon-spice automation. Replace `<admin-user>` with the account used to administer the workstation:
+
+```bash
+sudo -H -u <admin-user> dbus-run-session gsettings set com.linuxmint.updates auto-update-flatpaks true
+sudo -H -u <admin-user> dbus-run-session gsettings set com.linuxmint.updates auto-update-cinnamon-spices true
+```
+
+Disable Update Manager autostart and update notifications for standard users:
 ```bash
 # Disable for future users via skel:
 sudo mkdir -p /etc/skel/.config/autostart
@@ -691,6 +791,72 @@ sudo chmod 644 /etc/skel/.config/autostart/mintupdate.desktop
 # sudo mkdir -p /home/<user>/.config/autostart
 # sudo cp /etc/skel/.config/autostart/mintupdate.desktop /home/<user>/.config/autostart/
 # sudo chown -R <user>:<user> /home/<user>/.config/autostart
+```
+
+Disable per-login update behavior for each existing standard user. Keep this off for standard users because the machine is updated by the root timers above:
+
+```bash
+for user in <standard-user-1> <standard-user-2>; do
+  sudo -H -u "$user" dbus-run-session gsettings set com.linuxmint.updates auto-update-flatpaks false
+  sudo -H -u "$user" dbus-run-session gsettings set com.linuxmint.updates auto-update-cinnamon-spices false
+  sudo -H -u "$user" dbus-run-session gsettings set com.linuxmint.updates refresh-schedule-enabled false
+  sudo -H -u "$user" dbus-run-session gsettings set com.linuxmint.updates tracker-disable-notifications true
+  sudo -H -u "$user" dbus-run-session gsettings set com.linuxmint.updates hide-systray true
+  sudo -H -u "$user" dbus-run-session gsettings set com.linuxmint.updates show-flatpak-updates false
+  sudo -H -u "$user" dbus-run-session gsettings set com.linuxmint.updates show-cinnamon-updates false
+done
+```
+
+Verify `/usr/local/sbin/adduser.local` contains the same standard-user update defaults before its final `exit 0`. If this phase is being applied to an older workstation where Phase 5c already created the hook, edit the hook and insert the block before `exit 0`; do not append it after the exit line.
+
+```bash
+sudo grep -n 'auto-update-flatpaks\|mintupdate.desktop\|tracker-disable-notifications' /usr/local/sbin/adduser.local
+```
+
+Restrict manual package-management actions to admin users. This keeps standard users from using GUI update/package tools manually while preserving the root-level automatic update timers:
+
+```bash
+sudo tee /usr/share/polkit-1/rules.d/11-restrict-package-management.rules > /dev/null << 'EOF'
+polkit.addRule(function(action, subject) {
+    var prefixes = [
+        "com.linuxmint.updates.",
+        "org.debian.apt.",
+        "org.aptkit.",
+        "org.freedesktop.packagekit.",
+        "org.freedesktop.Flatpak."
+    ];
+
+    var managed = false;
+    for (var i = 0; i < prefixes.length; i++) {
+        if (action.id.indexOf(prefixes[i]) === 0) {
+            managed = true;
+            break;
+        }
+    }
+
+    if (managed) {
+        if (subject.user == "root") {
+            return polkit.Result.YES;
+        }
+        if (subject.isInGroup("sudo")) {
+            return polkit.Result.AUTH_ADMIN_KEEP;
+        }
+        return polkit.Result.NO;
+    }
+});
+EOF
+sudo chmod 644 /usr/share/polkit-1/rules.d/11-restrict-package-management.rules
+sudo systemctl restart polkit
+```
+
+**IMPORTANT:** This rule controls GUI/polkit package actions. It does not replace Unix permissions: standard users still must not be in `sudo`, and there must be no leftover NOPASSWD sudoers file.
+
+Verify standard users are not in `sudo`:
+
+```bash
+for user in <standard-user-1> <standard-user-2>; do
+  id "$user"
+done
 ```
 
 Restrict shutdown/restart to admin users only via polkit:
@@ -1142,7 +1308,15 @@ Run a comprehensive check of everything:
 - shared folder bookmark in file manager for all users
 - autostart onboarding.desktop is chmod 644 (NOT 600)
 - polkit power rules file is chmod 644 (NOT 600)
-- Update Manager disabled for non-admin users
+- Timeshift is configured with Daily and Boot snapshots, home directories excluded, and at least one manual snapshot exists before automatic updates are enabled
+- automatic package updates are enabled (`systemctl is-enabled mintupdate-automation-upgrade.timer`, `systemctl list-timers mintupdate-automation-upgrade.timer`, and `/var/lib/linuxmint/mintupdate-automatic-upgrades-enabled` exists)
+- obsolete kernel/dependency cleanup is enabled (`systemctl is-enabled mintupdate-automation-autoremove.timer`, `systemctl list-timers mintupdate-automation-autoremove.timer`, and `/var/lib/linuxmint/mintupdate-automatic-removals-enabled` exists)
+- if Flatpak is installed, `flatpak-system-update.timer` is enabled so system Flatpaks update even when no user is logged in
+- admin/operator account has Mint per-login Flatpak and Cinnamon-spice automation enabled if desired
+- Update Manager autostart is disabled for non-admin users and `/etc/skel/.config/autostart/mintupdate.desktop` is chmod 644
+- standard users have Mint per-login Flatpak/Cinnamon-spice automation, refresh scheduling, update notifications, Flatpak update display, and Cinnamon update display disabled in `com.linuxmint.updates`
+- `/usr/share/polkit-1/rules.d/11-restrict-package-management.rules` exists, chmod 644, and blocks manual GUI package/update actions for non-sudo users
+- standard users are not members of the `sudo` group
 - No leftover NOPASSWD sudoers file
 - All /etc/profile.d/ scripts are chmod 644
 - All files in /etc/xdg/autostart/ are chmod 644
@@ -1169,7 +1343,7 @@ Run a comprehensive check of everything:
 - `/mnt/data` is chmod 755 (not 777)
 - `/mnt/data/users/` exists, chmod 755, with a private dir (700) per user
 - Disk quotas are active (`repquota /` shows soft limits for standard users)
-- `/usr/local/sbin/adduser.local` exists, chmod 755, automates group + quota + data dir
+- `/usr/local/sbin/adduser.local` exists, chmod 755, automates group + quota + data dir + standard-user update restrictions
 - `/etc/profile.d/user-data-dir.sh` is chmod 644
 - My Data Storage desktop shortcut exists for all users
 - My Data Storage bookmark in file manager for all users

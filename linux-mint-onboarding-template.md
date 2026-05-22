@@ -371,6 +371,8 @@ Do not install Docker. Use Podman.
 
 Do not install NVIDIA drivers or system packages yourself. Ask the admin.
 
+Do not run Update Manager, Software Manager, Flatpak updates, Cinnamon spice updates, or manual system updates yourself. The workstation updates itself automatically in the background while it is powered on.
+
 Do not shut down or restart the workstation unless the admin told you to.
 
 Do not modify `/opt/conda-shared/envs/ml-base`. Clone it into your own account instead.
