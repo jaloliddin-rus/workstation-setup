@@ -985,7 +985,7 @@ Use the same onboarding structure on every workstation. Start from `linux-mint-o
 - `EXTRA_STORAGE_LOCATION`, `EXTRA_STORAGE_DESCRIPTION` — any additional storage row in the table
 - `CPU_LIMIT`, `MEMORY_HIGH`, `MEMORY_MAX`, `TASKS_MAX`
 
-Keep the same headings and order across machines. Write both `/srv/shared/ONBOARDING.md` (plain text) and `/srv/shared/ONBOARDING.html`. The HTML version must:
+Keep the same headings and order across machines. Use `linux-mint-onboarding-template.md` as the source template, but publish only `/srv/shared/ONBOARDING.html` for users. The HTML version must:
 - Use a readable dark theme
 - Include copy-to-clipboard buttons on all code blocks
 - Include a sticky left-sidebar table of contents auto-generated from headings
@@ -1289,7 +1289,92 @@ sudo systemctl start lightdm
 
 ---
 
-## Phase 14: Remote Desktop (xrdp)
+## Phase 14: Remote Desktop (NoMachine primary, xrdp fallback)
+
+Use **NoMachine** as the primary GUI remote-access method. It shares the existing physical Cinnamon desktop instead of starting a second Cinnamon session for the same user. This avoids the common xrdp failure mode where Cinnamon exits immediately when the same user already has a local GUI session.
+
+Download the current Linux DEB from the official NoMachine download page, then install it:
+
+```bash
+# From the directory containing the downloaded NoMachine .deb:
+sudo apt install -y ./nomachine_*.deb
+
+sudo systemctl enable --now nxserver
+sudo ufw allow 4000/tcp
+sudo ufw allow 4000/udp
+```
+
+Configure NoMachine server policy:
+
+```bash
+sudo cp /usr/NX/etc/server.cfg /usr/NX/etc/server.cfg.bak
+sudo cp /usr/NX/etc/node.cfg /usr/NX/etc/node.cfg.bak
+
+# Lock the physical desktop when a NoMachine physical-desktop connection drops.
+sudo sed -i 's/^#\?EnableLockScreen .*/EnableLockScreen 1/' /usr/NX/etc/server.cfg
+
+# Do not log the user out on disconnect; users should reconnect to the same desktop.
+sudo sed -i 's/^#\?LogoutOnDisconnect .*/LogoutOnDisconnect 0/' /usr/NX/etc/server.cfg
+
+# Standard users can connect to their own physical desktop; admins can support users.
+# Do not allow one standard user to connect to another standard user's desktop.
+sudo sed -i 's/^#\?PhysicalDesktopAccess .*/PhysicalDesktopAccess administrator,owner/' /usr/NX/etc/server.cfg
+
+# The desktop owner can reconnect without someone at the machine clicking Accept.
+# Admin support connections still require the desktop owner's acceptance unless
+# you intentionally change this to administrator,owner.
+sudo sed -i 's/^#\?PhysicalDesktopAccessNoAcceptance .*/PhysicalDesktopAccessNoAcceptance owner/' /usr/NX/etc/server.cfg
+sudo sed -i 's/^#\?PhysicalDesktopAcceptUsers .*/PhysicalDesktopAcceptUsers owner/' /usr/NX/etc/server.cfg
+
+# Let users reach the physical login screen when nobody is logged in.
+sudo sed -i 's/^#\?LoginScreenAccess .*/LoginScreenAccess 1/' /usr/NX/etc/server.cfg
+
+# Keep the preferences GUI available, but server changes require OS admin credentials.
+# On this workstation, admin means a Linux user in sudo, not a separate NoMachine account.
+sudo sed -i 's/^#\?EnableServerPreferences .*/EnableServerPreferences 1/' /usr/NX/etc/node.cfg
+sudo sed -i 's/^#\?EnableServerStatus .*/EnableServerStatus 1/' /usr/NX/etc/node.cfg
+sudo sed -i 's/^#\?DisplayMonitorIcon .*/DisplayMonitorIcon 1/' /usr/NX/etc/node.cfg
+
+# Shared-workstation safety: do not expose local disks, printers, USB devices,
+# or client/server network services through NoMachine.
+sudo sed -i 's/^#\?EnableDiskSharing .*/EnableDiskSharing none/' /usr/NX/etc/node.cfg
+sudo sed -i 's/^#\?EnablePrinterSharing .*/EnablePrinterSharing none/' /usr/NX/etc/node.cfg
+sudo sed -i 's/^#\?EnableUSBSharing .*/EnableUSBSharing none/' /usr/NX/etc/node.cfg
+sudo sed -i 's/^#\?EnableNetworkSharing .*/EnableNetworkSharing none/' /usr/NX/etc/node.cfg
+
+sudo systemctl restart nxserver
+```
+
+NoMachine client guidance for users:
+- Normal connection: protocol `NX`, host `<workstation-ip>`, port `4000`, Linux username/password.
+- If port `4000` is blocked, use a normal SSH tunnel and still use the NoMachine `NX` protocol to `localhost:<tunnel-port>`.
+- Do not tell users to select NoMachine's SSH protocol in the client. That is separate from normal SSH port forwarding and may not be available depending on the NoMachine edition.
+
+Verify:
+
+```bash
+dpkg -l | grep -E '^ii[[:space:]]+nomachine[[:space:]]'
+systemctl is-active nxserver
+systemctl is-enabled nxserver
+sudo ss -ltnp | grep ':4000'
+sudo ufw status numbered | grep 4000
+
+grep -E '^(EnableLockScreen|LogoutOnDisconnect|PhysicalDesktopAccess|PhysicalDesktopAccessNoAcceptance|PhysicalDesktopAcceptUsers|LoginScreenAccess) ' /usr/NX/etc/server.cfg
+grep -E '^(EnableServerPreferences|EnableServerStatus|DisplayMonitorIcon|EnableDiskSharing|EnablePrinterSharing|EnableUSBSharing|EnableNetworkSharing) ' /usr/NX/etc/node.cfg
+
+# Non-sudo standard-user check: opening NoMachine server preferences should ask
+# for admin credentials and should not accept the standard user's password.
+id <standard-user>
+```
+
+Test the important behavior before handing the workstation over:
+- Log into the physical Cinnamon desktop as a standard user.
+- Connect with NoMachine as that same standard user. It should show the existing Cinnamon desktop.
+- Disconnect the NoMachine client. The physical desktop should lock.
+- Try opening NoMachine server preferences as that standard user. It should require admin credentials.
+- Connect as an admin while a standard user's physical desktop is active. It should require acceptance from the desktop owner under the default policy above.
+
+### xrdp fallback
 
 Install xrdp so users can connect via RDP from Windows, macOS, or Linux:
 
@@ -1472,6 +1557,14 @@ Run a comprehensive check of everything:
 - `/usr/local/bin/x11-no-dpms.sh` exists and is chmod 755
 - `/etc/lightdm/lightdm.conf.d/50-no-dpms.conf` exists and is chmod 644
 - lightdm log confirms the script ran at startup with exit status 0 (`sudo grep "no-dpms" /var/log/lightdm/lightdm.log | tail -3`)
+- NoMachine is installed (`dpkg -l | grep -E '^ii[[:space:]]+nomachine[[:space:]]'`)
+- `nxserver` is running and enabled (`systemctl is-active nxserver && systemctl is-enabled nxserver`)
+- NoMachine NX service is listening on port 4000 (`sudo ss -ltnp | grep ':4000'`)
+- UFW allows NoMachine (`sudo ufw status numbered | grep 4000` shows TCP and UDP)
+- `/usr/NX/etc/server.cfg` has `EnableLockScreen 1`, `LogoutOnDisconnect 0`, `PhysicalDesktopAccess administrator,owner`, `PhysicalDesktopAccessNoAcceptance owner`, `PhysicalDesktopAcceptUsers owner`, and `LoginScreenAccess 1`
+- `/usr/NX/etc/node.cfg` has `EnableServerPreferences 1`, `EnableServerStatus 1`, `DisplayMonitorIcon 1`, `EnableDiskSharing none`, `EnablePrinterSharing none`, `EnableUSBSharing none`, and `EnableNetworkSharing none`
+- Standard users can connect with NoMachine to their own existing physical Cinnamon desktop and the workstation locks when their NoMachine connection drops
+- Standard users cannot change NoMachine server preferences with their own password; NoMachine asks for OS admin credentials
 - xrdp is running and enabled (systemctl status xrdp)
 - `xrdp` is in the `ssl-cert` group (`id xrdp | grep ssl-cert`) and can read its TLS key (`sudo -u xrdp test -r /etc/xrdp/key.pem`)
 - No new xrdp log entries say `Cannot read private key file` after the xrdp restart

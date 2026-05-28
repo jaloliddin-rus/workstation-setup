@@ -54,9 +54,61 @@ ssh your-username@<IP_ADDRESS>
 
 Replace `your-username` with your Linux username. Replace `<IP_ADDRESS>` with the workstation IP address.
 
-### Remote Desktop
+### NoMachine Remote Desktop
 
-Use Remote Desktop if you need the graphical desktop.
+Use NoMachine if you need the graphical desktop. NoMachine shows your existing Linux desktop, so you can start work at the workstation and continue from your laptop.
+
+Install the NoMachine client on your computer from:
+
+```text
+https://www.nomachine.com/download
+```
+
+Create a new connection:
+
+| Setting | Value |
+|-|-|
+| Protocol | `NX` |
+| Host | `<IP_ADDRESS>` |
+| Port | `4000` |
+| Username | your Linux username |
+| Password | your Linux password |
+
+Use your own username and password. If you connect and see another person's desktop, disconnect and contact the admin.
+
+#### Reconnect behaviour
+
+Closing the NoMachine window does **not** log you out. Your desktop and programs stay open. When you reconnect, you return to the same desktop.
+
+When you are actually finished, choose **Log Out** from the Linux menu. Only close the NoMachine window without logging out when you want to come back later.
+
+If the network drops or you close the NoMachine window, the workstation locks the desktop automatically.
+
+#### If NoMachine cannot connect
+
+Some networks block NoMachine's port `4000`. If SSH works but NoMachine does not, use an SSH tunnel.
+
+Open a terminal on your laptop and run:
+
+```bash
+ssh -N -L 4003:localhost:4000 your-username@<IP_ADDRESS>
+```
+
+Keep that terminal open. Then create a NoMachine connection with:
+
+| Setting | Value |
+|-|-|
+| Protocol | `NX` |
+| Host | `localhost` |
+| Port | `4003` |
+| Username | your Linux username |
+| Password | your Linux password |
+
+Do not choose NoMachine's `SSH` protocol for this. The tunnel uses normal SSH, but NoMachine should still use protocol `NX`.
+
+### RDP Remote Desktop
+
+RDP is available as a fallback, but NoMachine is preferred for graphical work because it reconnects to your existing desktop.
 
 | Your computer | App to use |
 |-|-|
